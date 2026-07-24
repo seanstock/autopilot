@@ -176,7 +176,7 @@ by the daemon with its own clock. The model cannot fabricate these.
 
 ```
 {"t":"2026-07-23T07:45:53-07:00","ev":"cycle_start","cycle":41,"kind":"work|critic","project":"spacestation"}
-{"t":"...","ev":"cycle_end","cycle":41,"minutes":34.2,"exit":"clean|context_full|usage_limit|timeout|crash|unknown","code":1,"tokens":{"in":1183000,"out":92000},"gitDiff":{"files":12,"ins":410,"del":55},"commit":"abc1234"}
+{"t":"...","ev":"cycle_end","cycle":41,"kind":"work","model":"claude-sonnet-5","minutes":34.2,"exit":"clean|context_full|usage_limit|timeout|crash|unknown","code":1,"tokens":{"in":1183000,"out":92000},"costUsd":15.32,"gitDiff":{"files":12,"ins":410,"del":55},"commit":"abc1234"}
 {"t":"...","ev":"budget","fiveHourPct":42.1,"sevenDayPct":18.0}
 {"t":"...","ev":"sleep","reason":"ceiling|outage|stop|review_gate","until":"..."}
 {"t":"...","ev":"grace_start","minutes":30}
@@ -229,7 +229,17 @@ still strips API keys (that one is not optional).
 ## 6. UI (one page, localhost, SSE)
 
 Header: usage gauges (each window: % used, ceiling marker, reset countdown),
-budget ceiling slider, grace input, global pause, FATAL banner when tripped.
+an "invested" tile (account-wide API-price cost + token totals across all
+cycles ever run), budget ceiling slider, grace input, global pause, FATAL
+banner when tripped.
+
+Token/cost accounting: `costUsd` is the CLI-reported `total_cost_usd` -
+what the same work would have cost at API prices, the natural meter for
+"cost invested" on a subscription. Durable running totals (overall and
+per model) live in each project's `.autopilot/state.json`, accumulated per
+cycle_end and seeded once by backfill from events.jsonl (totals must
+survive event-log rotation). The detail pane shows a per-model breakdown
+table per project.
 
 Project list: name, status (running cycle N / queued / sleeping until X /
 awaiting-review / stopped / fatal), priority drag, start/stop/pause,

@@ -62,6 +62,33 @@ function injectFilePath(dir) {
   return path.join(util.projectMeta(dir), 'INJECT.md');
 }
 
+// Token/model/cost accounting. Durable running totals live in each
+// project's runtime state.json (rotation-proof; events.jsonl is capped),
+// accumulated per cycle_end and seeded once by backfill from whatever
+// events.jsonl still holds. costUsd is the CLI-reported total_cost_usd,
+// i.e. what the same work would have cost at API prices - the meter for
+// "cost invested" on a subscription.
+function emptyTotals() {
+  return { in: 0, out: 0, costUsd: 0, cycles: 0, byModel: {} };
+}
+
+function addCycleToTotals(totals, model, tokens, costUsd) {
+  const t = tokens || {};
+  const inTok = Number(t.in) || 0;
+  const outTok = Number(t.out) || 0;
+  const cost = Number(costUsd) || 0;
+  totals.in += inTok;
+  totals.out += outTok;
+  totals.costUsd += cost;
+  totals.cycles += 1;
+  const key = model || 'unknown';
+  const m = totals.byModel[key] || (totals.byModel[key] = { in: 0, out: 0, costUsd: 0, cycles: 0 });
+  m.in += inTok;
+  m.out += outTok;
+  m.costUsd += cost;
+  m.cycles += 1;
+}
+
 function reviewedFilePath(dir) {
   return path.join(util.projectMeta(dir), 'REVIEWED');
 }
@@ -428,6 +455,10 @@ class Scheduler extends EventEmitter {
     const injectPending = !forcedKind && fs.existsSync(injectFilePath(project.dir));
     const kind = forcedKind || (!injectPending && criticRatio > 0 && cycleNumber % criticRatio === 0 ? 'critic' : 'work');
 
+    // Seed totals BEFORE this cycle's cycle_end lands in events.jsonl, or
+    // the backfill would double-count it.
+    this._ensureTotals(project, runtime);
+
     this._current = { projectId: project.id, cycle: cycleNumber, kind, startedIso: util.nowIso() };
     this._emitStatusIfChanged();
 
@@ -465,6 +496,7 @@ class Scheduler extends EventEmitter {
       events.appendEvent(project.dir, project.id, 'cycle_end', {
         cycle: cycleNumber,
         kind,
+        model: project.model,
         minutes: result.minutes,
         exit: result.exit,
         code: result.code,
@@ -493,6 +525,7 @@ class Scheduler extends EventEmitter {
 
     runtime.cycle = cycleNumber;
     runtime.sinceReview = (runtime.sinceReview || 0) + 1;
+    addCycleToTotals(runtime.totals, project.model, result.tokens, result.costUsd);
 
     if (result.exit === 'crash') {
       const now = Date.now();
@@ -591,6 +624,13 @@ class Scheduler extends EventEmitter {
       statusDetail = 'queued';
     }
 
+    if (!runtime.totals) {
+      // First status render since the totals feature landed: seed from
+      // events.jsonl once and persist, so it never re-scans.
+      this._ensureTotals(project, runtime);
+      state.writeRuntime(project.dir, runtime);
+    }
+
     const info = this._lastCycleInfo[project.id] || {};
     let pendingInject = false;
     try {
@@ -606,6 +646,7 @@ class Scheduler extends EventEmitter {
       lastExit: info.lastExit || null,
       lastCommit: info.lastCommit || null,
       pendingInject,
+      totals: runtime.totals,
     };
   }
 
@@ -651,8 +692,42 @@ class Scheduler extends EventEmitter {
         webhook: this.stateObj.settings.webhook,
       },
       current: fatalRecord ? null : this._current,
+      totals: (() => {
+        const g = emptyTotals();
+        for (const p of projects) {
+          const t = p.totals;
+          if (!t) continue;
+          g.in += t.in || 0;
+          g.out += t.out || 0;
+          g.costUsd += t.costUsd || 0;
+          g.cycles += t.cycles || 0;
+          for (const [model, m] of Object.entries(t.byModel || {})) {
+            const gm = g.byModel[model] || (g.byModel[model] = { in: 0, out: 0, costUsd: 0, cycles: 0 });
+            gm.in += m.in || 0;
+            gm.out += m.out || 0;
+            gm.costUsd += m.costUsd || 0;
+            gm.cycles += m.cycles || 0;
+          }
+        }
+        return g;
+      })(),
       projects,
     };
+  }
+
+  _ensureTotals(project, runtime) {
+    if (runtime.totals) return;
+    const totals = emptyTotals();
+    try {
+      for (const e of events.readEvents(project.dir, 100000)) {
+        if (e && e.ev === 'cycle_end') {
+          addCycleToTotals(totals, e.model || project.model, e.tokens, e.costUsd);
+        }
+      }
+    } catch (err) {
+      // no events yet - totals start at zero
+    }
+    runtime.totals = totals;
   }
 
   _emitStatusIfChanged() {

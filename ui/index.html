@@ -178,6 +178,12 @@
   .modal .m-actions { display: flex; justify-content: flex-end; gap: 8px; }
   .contain-warn { display: none; font-size: 12px; color: var(--accent); margin: -8px 0 16px; }
 
+  /* ---------- invested tile ---------- */
+  .invested { border-left: 1px solid var(--border); padding-left: 24px; display: flex; flex-direction: column; justify-content: center; gap: 3px; min-width: 130px; }
+  .inv-label { font-size: 11px; color: var(--text-secondary); }
+  .inv-cost { font-family: var(--font-mono); font-size: 22px; font-weight: 600; line-height: 1; }
+  .inv-tok { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
+
   /* ---------- inject card ---------- */
   #injText { width: 100%; resize: vertical; min-height: 60px; }
   .inj-actions { display: flex; justify-content: flex-end; margin-top: 8px; gap: 8px; }
@@ -216,6 +222,8 @@
     </div>
 
     <div class="gauges" id="gauges"></div>
+
+    <div class="invested" id="invested"></div>
 
     <div class="controls">
       <div class="ctl-row"><span>ceiling</span><input type="range" id="ceil" min="10" max="100" value="75"><span class="val" id="ceilVal">75%</span></div>
@@ -522,6 +530,23 @@ function renderGauges() {
     </div>`).join('') || '<div style="color:var(--text-secondary);font-size:12px;">budget unavailable</div>';
   paintGauges(ceil);
   tickCountdowns();
+  renderInvested();
+}
+
+function fmtCost(n) {
+  if (n == null) return '$0.00';
+  if (n >= 1000) return '$' + (n / 1000).toFixed(2) + 'k';
+  return '$' + n.toFixed(2);
+}
+
+function renderInvested() {
+  const t = status.totals;
+  const el = document.getElementById('invested');
+  if (!t || !t.cycles) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <div class="inv-label">invested &middot; api prices</div>
+    <div class="inv-cost">${fmtCost(t.costUsd)}</div>
+    <div class="inv-tok">${fmtTokens(t.in)} in &middot; ${fmtTokens(t.out)} out &middot; ${t.cycles} cycles</div>`;
 }
 
 function paintGauges(ceil) {
@@ -702,6 +727,36 @@ function renderTailLine(raw) {
   return `<div class="${cls}"><span class="t">${escapeHtml(timeShort(iso))}</span> ${label}${escapeHtml(msg)}</div>`;
 }
 
+function renderInvestedCard(p) {
+  const t = p.totals;
+  if (!t || !t.cycles) return '';
+  const rows = Object.entries(t.byModel || {})
+    .sort((a, b) => b[1].costUsd - a[1].costUsd)
+    .map(([model, m]) => `
+      <tr>
+        <td>${escapeHtml(model)}</td>
+        <td class="num">${safeNum(m.cycles, 0)}</td>
+        <td class="num">${fmtTokens(m.in)}</td>
+        <td class="num">${fmtTokens(m.out)}</td>
+        <td class="num">${fmtCost(m.costUsd)}</td>
+      </tr>`).join('');
+  return `
+    <div class="card">
+      <h3>Invested <span class="sub">what this work would cost at API prices</span></h3>
+      <table>
+        <tr><th>model</th><th class="num">cycles</th><th class="num">tokens in</th><th class="num">out</th><th class="num">cost</th></tr>
+        ${rows}
+        <tr>
+          <td style="color:var(--text-secondary)">total</td>
+          <td class="num">${safeNum(t.cycles, 0)}</td>
+          <td class="num">${fmtTokens(t.in)}</td>
+          <td class="num">${fmtTokens(t.out)}</td>
+          <td class="num" style="font-weight:600">${fmtCost(t.costUsd)}</td>
+        </tr>
+      </table>
+    </div>`;
+}
+
 function renderDetailShell(loading, errorMsg) {
   const p = findProject(selectedId);
   if (!p) { document.getElementById('detail').innerHTML = ''; return; }
@@ -745,6 +800,7 @@ function renderDetailShell(loading, errorMsg) {
         ${cycleRows}
       </table>
     </div>
+    ${renderInvestedCard(p)}
     <div class="card">
       <h3>Plan <span class="sub">PLAN.md &middot; read-only</span></h3>
       <div class="plan" id="planBody">${loading ? '<div class="empty-note">loading...</div>' : (errorMsg ? '' : renderMdLite(detailCache.planMd))}</div>

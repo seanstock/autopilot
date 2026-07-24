@@ -393,6 +393,63 @@ test('usage_limit exit flips to sleep immediately, on the very next tick', async
   assert.ok(wrapEnd, 'wrapup cycle stamped its own cycle_start/cycle_end events');
 });
 
+test('token/cost totals accumulate per model, stamp cycle_end, and reach the snapshot', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project]);
+
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult({ tokens: { in: 1000, out: 100 }, costUsd: 0.5 });
+  };
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => runs >= 2);
+  await sched.stopDaemon();
+
+  const runtime = state.readRuntime(project.dir);
+  assert.ok(runtime.totals.cycles >= 2);
+  assert.equal(runtime.totals.in, runtime.totals.cycles * 1000);
+  assert.equal(runtime.totals.out, runtime.totals.cycles * 100);
+  assert.ok(Math.abs(runtime.totals.costUsd - runtime.totals.cycles * 0.5) < 1e-9);
+  const m = runtime.totals.byModel['claude-sonnet-5'];
+  assert.equal(m.cycles, runtime.totals.cycles);
+
+  const evs = events.readEvents(project.dir, 50);
+  const end = evs.find((e) => e.ev === 'cycle_end');
+  assert.equal(end.model, 'claude-sonnet-5');
+
+  const snap = sched.snapshot();
+  assert.equal(snap.projects[0].totals.cycles, runtime.totals.cycles);
+  assert.equal(snap.totals.in, runtime.totals.in, 'global totals sum project totals');
+});
+
+test('totals backfill seeds once from existing events.jsonl', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project]);
+
+  events.appendEvent(project.dir, project.id, 'cycle_end', {
+    cycle: 1, kind: 'work', model: 'claude-fable-5', tokens: { in: 7000, out: 300 }, costUsd: 2.25,
+  });
+  events.appendEvent(project.dir, project.id, 'cycle_end', {
+    cycle: 2, kind: 'work', model: 'claude-fable-5', tokens: { in: 3000, out: 200 }, costUsd: 0.75,
+  });
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl: async () => cleanResult(), notifyImpl: () => {}, tickMs: 15 });
+  const snap = sched.snapshot(); // no cycle has run; snapshot triggers backfill
+
+  const t = snap.projects[0].totals;
+  assert.equal(t.cycles, 2);
+  assert.equal(t.in, 10000);
+  assert.equal(t.out, 500);
+  assert.ok(Math.abs(t.costUsd - 3.0) < 1e-9);
+  assert.equal(t.byModel['claude-fable-5'].cycles, 2);
+
+  const persisted = state.readRuntime(project.dir);
+  assert.equal(persisted.totals.cycles, 2, 'backfill persists so it never re-scans');
+});
+
 test('pending injection forces the next cycle to be work even on critic cadence', async () => {
   const project = makeProject({ criticRatio: 1 }); // every cycle would be critic
   const stateObj = makeStateObj([project]);
@@ -812,13 +869,13 @@ test('snapshot matches the shared status contract shape', async () => {
   });
 
   const snap = sched.snapshot();
-  assert.deepEqual(Object.keys(snap).sort(), ['budget', 'current', 'daemon', 'fatal', 'projects', 'settings'].sort());
+  assert.deepEqual(Object.keys(snap).sort(), ['budget', 'current', 'daemon', 'fatal', 'projects', 'settings', 'totals'].sort());
   assert.deepEqual(Object.keys(snap.daemon).sort(), ['pid', 'startedIso', 'version', 'paused'].sort());
   assert.deepEqual(Object.keys(snap.budget).sort(), ['ok', 'reason', 'checkedIso', 'windows'].sort());
   assert.deepEqual(Object.keys(snap.settings).sort(), ['ceilingPct', 'graceMinutes', 'webhook'].sort());
 
   const p = snap.projects[0];
-  for (const key of ['status', 'statusDetail', 'cycle', 'sinceReview', 'lastExit', 'lastCommit']) {
+  for (const key of ['status', 'statusDetail', 'cycle', 'sinceReview', 'lastExit', 'lastCommit', 'pendingInject', 'totals']) {
     assert.ok(key in p, `missing ${key} on project snapshot`);
   }
   assert.ok(

@@ -12,6 +12,10 @@
   },
   "settings": { "ceilingPct": 75, "graceMinutes": 30, "webhook": null },
   "current": { "projectId": "spacestation", "cycle": 41, "kind": "work", "startedIso": "2026-07-23T07:45:53-07:00" },
+  "totals": { "in": 512400000, "out": 4180000, "costUsd": 947.13, "cycles": 71,
+    "byModel": {
+      "claude-fable-5": { "in": 391000000, "out": 3100000, "costUsd": 802.4, "cycles": 41 },
+      "claude-sonnet-5": { "in": 121400000, "out": 1080000, "costUsd": 144.73, "cycles": 30 } } },
   "projects": [
     {
       "id": "spacestation",
@@ -30,6 +34,8 @@
       "sinceReview": 0,
       "lastExit": "clean",
       "lastCommit": "abc1234",
+      "totals": { "in": 391000000, "out": 3100000, "costUsd": 802.4, "cycles": 41,
+        "byModel": { "claude-fable-5": { "in": 391000000, "out": 3100000, "costUsd": 802.4, "cycles": 41 } } },
       "_mock": {
         "activity": [
           "[2026-07-23T07:45:53-07:00] [daemon] cycle 41 start · work · claude-fable-5 · timeout 120m",
