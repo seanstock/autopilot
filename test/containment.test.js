@@ -518,6 +518,96 @@ test('ensureContainment returns settingsPath under <dir>/.autopilot/cycle_settin
   assert.equal(result.warning, undefined);
 });
 
+// --- v0.3: orchestrate settings variant + scout agent ------------------------
+
+test('ensureContainment returns {settingsPath, orchestrateSettingsPath} shape (no warning when containment standard)', () => {
+  const project = baseProject();
+  const result = containment.ensureContainment(project);
+  assert.equal(result.settingsPath, path.join(project.dir, '.autopilot', 'cycle_settings.json'));
+  assert.equal(result.orchestrateSettingsPath, path.join(project.dir, '.autopilot', 'cycle_settings_orchestrate.json'));
+  assert.equal(result.warning, undefined);
+  assert.ok(fs.existsSync(result.settingsPath));
+  assert.ok(fs.existsSync(result.orchestrateSettingsPath));
+});
+
+test('ensureContainment return shape carries warning + orchestrateSettingsPath when containment is off', () => {
+  const project = baseProject({ containment: 'off' });
+  const result = containment.ensureContainment(project);
+  assert.equal(result.warning, 'containment off');
+  assert.equal(result.orchestrateSettingsPath, path.join(project.dir, '.autopilot', 'cycle_settings_orchestrate.json'));
+  assert.ok(fs.existsSync(result.orchestrateSettingsPath));
+});
+
+test('orchestrate settings variant allows Task while the base variant does not', () => {
+  const project = baseProject();
+  const { settingsPath, orchestrateSettingsPath } = containment.ensureContainment(project);
+  const base = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  const orchestrate = JSON.parse(fs.readFileSync(orchestrateSettingsPath, 'utf8'));
+
+  assert.ok(!base.permissions.allow.includes('Task'), 'base settings must not allow Task');
+  assert.ok(orchestrate.permissions.allow.includes('Task'), 'orchestrate settings must allow Task');
+
+  // Orchestrate variant is otherwise the base variant (same deny walls,
+  // same hook wiring) with Task added, not a divergent settings shape.
+  assert.deepEqual(orchestrate.permissions.deny, base.permissions.deny);
+  assert.deepEqual(orchestrate.hooks, base.hooks);
+  assert.deepEqual(
+    orchestrate.permissions.allow.filter((t) => t !== 'Task').sort(),
+    base.permissions.allow.sort()
+  );
+});
+
+test('orchestrate settings variant allows Task even when containment is off', () => {
+  const project = baseProject({ containment: 'off' });
+  const { orchestrateSettingsPath } = containment.ensureContainment(project);
+  const orchestrate = JSON.parse(fs.readFileSync(orchestrateSettingsPath, 'utf8'));
+  assert.ok(orchestrate.permissions.allow.includes('Task'));
+  assert.equal(orchestrate.permissions.deny, undefined);
+});
+
+test('scout.md is NOT written when project.workerModel is absent', () => {
+  const project = baseProject();
+  containment.ensureContainment(project);
+  const scoutPath = path.join(project.dir, '.claude', 'agents', 'scout.md');
+  assert.equal(fs.existsSync(scoutPath), false);
+});
+
+test('scout.md is written under <dir>/.claude/agents/scout.md when project.workerModel is set', () => {
+  const project = baseProject({ workerModel: 'claude-haiku' });
+  containment.ensureContainment(project);
+  const scoutPath = path.join(project.dir, '.claude', 'agents', 'scout.md');
+  assert.ok(fs.existsSync(scoutPath));
+});
+
+test('scout.md is pure ASCII bytes', () => {
+  const project = baseProject({ workerModel: 'claude-haiku' });
+  containment.ensureContainment(project);
+  const scoutPath = path.join(project.dir, '.claude', 'agents', 'scout.md');
+  const bytes = fs.readFileSync(scoutPath);
+  assert.match(bytes.toString('latin1'), /^[\x00-\x7F]*$/);
+  assert.ok(bytes.length > 0);
+});
+
+test('scout.md frontmatter has name, description, the five read-only tools, and model: sonnet - no Edit/Write/Bash', () => {
+  const project = baseProject({ workerModel: 'claude-haiku' });
+  containment.ensureContainment(project);
+  const scoutPath = path.join(project.dir, '.claude', 'agents', 'scout.md');
+  const content = fs.readFileSync(scoutPath, 'utf8');
+
+  assert.match(content, /^---\r?\n/);
+  assert.match(content, /name:\s*scout/);
+  assert.match(content, /description:\s*Read-only research and verification subagent\. Use for parallel exploration, auditing, and fact-checking\. Never edits files\./);
+  assert.match(content, /model:\s*sonnet/);
+
+  const toolsLine = /tools:\s*(.+)/.exec(content);
+  assert.ok(toolsLine, 'expected a tools: line in scout.md frontmatter');
+  const tools = toolsLine[1].split(',').map((t) => t.trim());
+  assert.deepEqual(tools.sort(), ['Glob', 'Grep', 'Read', 'WebFetch', 'WebSearch'].sort());
+  assert.ok(!tools.includes('Edit'));
+  assert.ok(!tools.includes('Write'));
+  assert.ok(!tools.includes('Bash'));
+});
+
 // --- preambles --------------------------------------------------------------
 
 test('workPreamble includes PLAN.md, UPDATES.md, never force-push, and the mission prompt', () => {
@@ -555,4 +645,60 @@ test('criticPreamble includes PLAN.md, UPDATES.md, never force-push, refute lang
 
 test('PREAMBLE_VERSION is the string "1"', () => {
   assert.equal(preambles.PREAMBLE_VERSION, '1');
+});
+
+// --- v0.3: orchestratorPreamble, workerOrderSection, injectionSection ---------
+
+test('orchestratorPreamble forbids implementation work and covers orders/ contract, closing/reopening, and scout effort-scaling', () => {
+  const project = baseProject({ prompt: 'ORCH_MISSION_TEXT_11111' });
+  const text = preambles.orchestratorPreamble(project);
+  assert.match(text, /no implementation work|NO implementation work/i);
+  assert.match(text, /orders\//);
+  assert.match(text, /status:\s*open\|in_progress\|done\|blocked|open\|in_progress\|done\|blocked/);
+  assert.match(text, /disposable/i);
+  assert.match(text, /verify/i);
+  assert.match(text, /reopen/i);
+  assert.match(text, /scout/i);
+  assert.match(text, /PLAN\.md/);
+  assert.match(text, /UPDATES\.md/);
+  assert.match(text, /never\s+force-push/i);
+  assert.match(text, /ORCH_MISSION_TEXT_11111/);
+  assert.match(text, /## Mission/);
+});
+
+test('orchestratorPreamble quotes the exact order file format', () => {
+  const text = preambles.orchestratorPreamble(baseProject());
+  assert.match(text, /# <title>/);
+  assert.match(text, /status: open/);
+  assert.match(text, /created: <iso> by cycle <n>/);
+  assert.match(text, /verify: <command, or - if none>/);
+  assert.match(text, /## Objective/);
+  assert.match(text, /## Acceptance criteria/);
+  assert.match(text, /## Boundaries/);
+});
+
+test('workerOrderSection embeds the order verbatim and states the ONE-order rule', () => {
+  const order = { id: '003-do-thing', content: '# Do the thing\nstatus: open\nUNIQUE_ORDER_BODY_99999' };
+  const text = preambles.workerOrderSection(order);
+  assert.match(text, /ONE work order/i);
+  assert.match(text, /003-do-thing/);
+  assert.match(text, /UNIQUE_ORDER_BODY_99999/);
+  assert.match(text, /status: in_progress/);
+  assert.match(text, /status: blocked/);
+  assert.match(text, /verify/i);
+  assert.match(text, /END the cycle/i);
+});
+
+test('injectionSection default (non-orchestrated) keeps the v0.2 "do the work" triage language', () => {
+  const text = preambles.injectionSection('UNIQUE_DIRECTIVE_22222');
+  assert.match(text, /UNIQUE_DIRECTIVE_22222/);
+  assert.match(text, /break\s+it into PLAN tasks and start executing them/i);
+});
+
+test('injectionSection(text, true) routes "complex" to spec update + orders, not direct execution', () => {
+  const text = preambles.injectionSection('UNIQUE_DIRECTIVE_33333', true);
+  assert.match(text, /UNIQUE_DIRECTIVE_33333/);
+  assert.match(text, /emit\s+(one\s+or\s+)?more\s+work\s+orders/i);
+  assert.match(text, /orders\//);
+  assert.doesNotMatch(text, /break\s+it into PLAN tasks and start executing them/i);
 });

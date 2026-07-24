@@ -293,6 +293,66 @@ test('file endpoint: unknown project id returns 404', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// orders endpoint
+// ---------------------------------------------------------------------------
+
+test('orders endpoint: happy path, sorted, non-md files ignored', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-server-orders-'));
+  const ordersDir = path.join(dir, 'orders');
+  fs.mkdirSync(ordersDir);
+  fs.writeFileSync(
+    path.join(ordersDir, '002-second.md'),
+    '# Second order\nstatus: in_progress\ncreated: 2026-07-24T00:00:00-07:00 by cycle 3\nverify: -\n'
+  );
+  fs.writeFileSync(
+    path.join(ordersDir, '001-first.md'),
+    '# First order\nstatus: done\ncreated: 2026-07-24T00:00:00-07:00 by cycle 1\nverify: -\n'
+  );
+  fs.writeFileSync(
+    path.join(ordersDir, '003-blocked.md'),
+    '# Blocked order\nstatus: blocked\ncreated: 2026-07-24T00:00:00-07:00 by cycle 4\nverify: -\n'
+  );
+  fs.writeFileSync(path.join(ordersDir, 'notes.txt'), 'not an order');
+  const sched = makeFakeScheduler([{ id: 'proj1', dir }]);
+
+  try {
+    await withServer(sched, async (port) => {
+      const res = await requestRaw(port, 'GET', '/api/projects/proj1/orders', { host: `127.0.0.1:${port}` });
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body.orders, [
+        { id: '001-first', title: 'First order', status: 'done' },
+        { id: '002-second', title: 'Second order', status: 'in_progress' },
+        { id: '003-blocked', title: 'Blocked order', status: 'blocked' },
+      ]);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('orders endpoint: no orders dir returns empty array', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-server-orders-empty-'));
+  const sched = makeFakeScheduler([{ id: 'proj1', dir }]);
+  try {
+    await withServer(sched, async (port) => {
+      const res = await requestRaw(port, 'GET', '/api/projects/proj1/orders', { host: `127.0.0.1:${port}` });
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body.orders, []);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('orders endpoint: unknown project id returns 404', async () => {
+  const sched = makeFakeScheduler([]);
+  await withServer(sched, async (port) => {
+    const res = await requestRaw(port, 'GET', '/api/projects/nope/orders', { host: `127.0.0.1:${port}` });
+    assert.equal(res.status, 404);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 404
 // ---------------------------------------------------------------------------
 

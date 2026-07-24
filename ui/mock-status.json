@@ -36,7 +36,15 @@
       "lastCommit": "abc1234",
       "totals": { "in": 391000000, "out": 3100000, "costUsd": 802.4, "cycles": 41,
         "byModel": { "claude-fable-5": { "in": 391000000, "out": 3100000, "costUsd": 802.4, "cycles": 41 } } },
+      "orders": { "open": 1, "inProgress": 1, "done": 2, "blocked": 1 },
       "_mock": {
+        "orders": [
+          { "id": "001-hab-ring-greeble", "title": "Hab ring exterior greeble pass", "status": "done" },
+          { "id": "002-docking-collar-uv", "title": "Fix seam lighting artifact on docking collar UVs", "status": "done" },
+          { "id": "003-solar-array-anim", "title": "Solar array deployment animation, keyframe blocking", "status": "in_progress" },
+          { "id": "004-render-time-reverify", "title": "Re-verify render times claimed in WORKLOG 07-21", "status": "blocked" },
+          { "id": "005-corridor-kit", "title": "Interior corridor kit: 3 modular sections + trim sheet", "status": "open" }
+        ],
         "activity": [
           "[2026-07-23T07:45:53-07:00] [daemon] cycle 41 start · work · claude-fable-5 · timeout 120m",
           "[2026-07-23T07:46:31-07:00] [model] Read PLAN.md, 5 open items. Taking: solar array deployment animation.",
@@ -53,13 +61,13 @@
           { "t": "2026-07-22T17:40:00-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 36, "kind": "work" },
           { "t": "2026-07-22T17:58:06-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 36, "kind": "work", "minutes": 18.1, "exit": "usage_limit", "code": 1, "tokens": { "in": 400000, "out": 21000 }, "costUsd": 1.62, "gitDiff": { "files": 3, "ins": 61, "del": 4 }, "commit": "9e0d144" },
           { "t": "2026-07-22T18:40:00-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 37, "kind": "work" },
-          { "t": "2026-07-22T20:40:03-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 37, "kind": "work", "minutes": 120.0, "exit": "timeout", "code": 1, "tokens": { "in": 2200000, "out": 143000 }, "costUsd": 9.84, "gitDiff": { "files": 14, "ins": 522, "del": 301 }, "commit": "31b5c77" },
+          { "t": "2026-07-22T20:40:03-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 37, "kind": "work", "minutes": 120.0, "exit": "timeout", "code": 1, "tokens": { "in": 2200000, "out": 143000 }, "costUsd": 9.84, "gitDiff": { "files": 14, "ins": 522, "del": 301 }, "commit": "31b5c77", "verify": { "cmd": "npm test", "ok": false, "code": 1 } },
           { "t": "2026-07-22T21:10:00-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 38, "kind": "critic" },
           { "t": "2026-07-22T21:32:24-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 38, "kind": "critic", "minutes": 22.4, "exit": "clean", "code": 0, "tokens": { "in": 800000, "out": 34000 }, "costUsd": 3.10, "gitDiff": { "files": 1, "ins": 18, "del": 0 }, "commit": "77ac910" },
           { "t": "2026-07-22T22:20:00-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 39, "kind": "work" },
           { "t": "2026-07-22T23:21:00-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 39, "kind": "work", "minutes": 61.0, "exit": "context_full", "code": 1, "tokens": { "in": 1900000, "out": 121000 }, "costUsd": 7.55, "gitDiff": { "files": 9, "ins": 238, "del": 12 }, "commit": "f19d02e" },
           { "t": "2026-07-23T05:20:00-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 40, "kind": "work" },
-          { "t": "2026-07-23T06:12:48-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 40, "kind": "work", "minutes": 52.8, "exit": "clean", "code": 0, "tokens": { "in": 1400000, "out": 102000 }, "costUsd": 6.20, "gitDiff": { "files": 12, "ins": 410, "del": 55 }, "commit": "abc1234" },
+          { "t": "2026-07-23T06:12:48-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 40, "kind": "work", "minutes": 52.8, "exit": "clean", "code": 0, "tokens": { "in": 1400000, "out": 102000 }, "costUsd": 6.20, "gitDiff": { "files": 12, "ins": 410, "del": 55 }, "commit": "abc1234", "verify": { "cmd": "npm test", "ok": true, "code": 0 } },
           { "t": "2026-07-23T07:45:53-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 41, "kind": "work" }
         ],
         "updatesMd": "## 2026-07-23 08:04\nCycle 41, in progress. Blocked out the solar array deployment animation, four unfold stages over 180 frames. Hit a hinge intersecting the truss at frame 120 and fixed it. Next up is the interior corridor kit. Nothing uncertain right now.\n\n## 2026-07-23 06:12\nCycle 40. Finished the docking collar UV fix and re-rendered the affected turntable frames. The seam artifact is gone at render time, verified against the 07-21 output. Started planning the corridor kit before wrapping up.\n\n## 2026-07-22 23:40\nCycle 39. Greeble pass on the hab ring is done, but I ran out of context partway through the writeup, so the WORKLOG for this cycle is thinner than usual. The next critic pass should double-check my density claims against the concept ref.",

@@ -161,6 +161,13 @@ function addProject(stateObj, opts) {
   // reachable stored-XSS the next time the UI renders that project. Reject
   // (fall back to the default) rather than store an unvalidated value.
   const NUMERIC_KEYS = new Set(['priority', 'maxCycleMinutes', 'criticRatio', 'reviewGateCycles']);
+  // v0.3: verifyCmd/workerModel are optional non-empty-string fields that
+  // enable per-cycle gating / orchestration respectively when present.
+  // Same stored-XSS concern as I6 above applies (projects.json renders back
+  // into the UI) - a non-string or empty value is dropped rather than
+  // stored, and since neither has a PROJECT_DEFAULTS entry, "dropped" means
+  // the field stays absent (feature off), not reset to some default.
+  const STRING_KEYS = new Set(['verifyCmd', 'workerModel']);
   for (const key of [
     'priority',
     'model',
@@ -169,11 +176,19 @@ function addProject(stateObj, opts) {
     'reviewGateCycles',
     'containment',
     'enabled',
+    'verifyCmd',
+    'workerModel',
   ]) {
     if (options[key] === undefined) continue;
     if (NUMERIC_KEYS.has(key)) {
       const n = Number(options[key]);
       if (Number.isFinite(n)) project[key] = n;
+      continue;
+    }
+    if (STRING_KEYS.has(key)) {
+      if (typeof options[key] === 'string' && options[key].trim().length > 0) {
+        project[key] = options[key];
+      }
       continue;
     }
     project[key] = options[key];

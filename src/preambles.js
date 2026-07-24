@@ -201,7 +201,28 @@ be done in a couple of minutes.
 // INJECT.md has content, then archives+clears the file (the daemon owns
 // .autopilot; cycles cannot write it). Transcribe-first makes the
 // directive survive a cycle that dies seconds after starting.
-function injectionSection(text) {
+//
+// `orchestrated` (v0.3): when the project has orchestration enabled
+// (project.workerModel set), a pending injection is routed to an
+// `orchestrate` cycle rather than a plain `work` cycle (scheduler's job -
+// see docs/plans/2026-07-24-goal-loop.md), so "complex" here means update
+// the spec AND emit orders for worker cycles to pick up, not do the work
+// directly in this cycle.
+function injectionSection(text, orchestrated) {
+  const complexClause = orchestrated
+    ? `   - COMPLEX (multiple tasks, or it changes scope, requirements, or
+     architecture): update the project's living spec document to reflect
+     the directive (e.g. docs/SPEC.md; if the project has no spec, record
+     the design decision at the top of PLAN.md instead), THEN emit one or
+     more work orders into orders/ (see the order format in the
+     orchestrator contract) for worker cycles to execute. Do not do the
+     implementation work yourself this cycle - your job is to plan it.`
+    : `   - COMPLEX (multiple tasks, or it changes scope, requirements, or
+     architecture): FIRST update the project's living spec document to
+     reflect the directive (e.g. docs/SPEC.md; if the project has no spec,
+     record the design decision at the top of PLAN.md instead), THEN break
+     it into PLAN tasks and start executing them.`;
+
   return `## USER DIRECTIVE (injected for this cycle)
 
 The human injected the following between cycles. It outranks the current
@@ -218,15 +239,162 @@ Handle it FIRST, before any PLAN work:
 2. Triage it:
    - SIMPLE (one self-contained task, no spec/scope implications): just do
      it now, with normal checkpoint discipline.
-   - COMPLEX (multiple tasks, or it changes scope, requirements, or
-     architecture): FIRST update the project's living spec document to
-     reflect the directive (e.g. docs/SPEC.md; if the project has no spec,
-     record the design decision at the top of PLAN.md instead), THEN break
-     it into PLAN tasks and start executing them.
+${complexClause}
 3. Note in UPDATES.md that the directive was received and how you triaged
    it (simple vs complex, and why).
 
 This is not optional context; it is the human steering the mission.
+`;
+}
+
+// Orchestrator cycle (v0.3): the planner role in cross-cycle orchestration.
+// Runs with the big model (project.model), never touches implementation,
+// and maintains the disposable orders/ queue that one-order worker cycles
+// consume. See docs/plans/2026-07-24-goal-loop.md "Shared contracts" for
+// the exact order format and the effort-scaling rule this preamble quotes
+// verbatim for the scout subagent.
+function orchestratorPreamble(project) {
+  const prompt = (project && project.prompt) || '';
+  return `You are running one autonomous ORCHESTRATE cycle under Autopilot (cycle
+contract v${PREAMBLE_VERSION}). This is a PLANNING cycle, not a work cycle: you
+do NO implementation work yourself this cycle. Your only job is to read the
+current state of the project and maintain a queue of work orders that
+one-order worker cycles (a cheaper model) will execute one at a time.
+
+This preamble is fixed and not part of the mission - it is the operating
+contract this cycle runs under. Follow it exactly, in order.
+
+## 1. Read before you plan
+
+Read, in this order: the mission below, PLAN.md, UPDATES.md (recent
+entries), and every file in orders/ (if the directory does not exist,
+create it - there is nothing to read yet). Understand what is open, what
+worker cycles have claimed done, and what is blocked.
+
+## 2. Orders are disposable, not precious
+
+Orders are structured, model-written project files. If the queue has
+drifted from the mission (stale orders, orders that no longer make sense,
+gaps where nothing is queued for real gaps in the work), regenerate the
+affected orders from the mission and PLAN.md rather than trying to patch
+them into consistency. Do not be precious about an order you wrote last
+cycle if it is now wrong.
+
+Each order lives in orders/ as its own file, filename \`NNN-slug.md\`
+(zero-padded, ascending, e.g. \`001-add-login-form.md\`). Use this exact
+format for every order you write:
+
+\`\`\`
+# <title>
+status: open
+created: <iso> by cycle <n>
+verify: <command, or - if none>
+
+## Objective
+<what to do>
+
+## Acceptance criteria
+- [ ] <criterion>
+
+## Boundaries
+<files/areas this order may touch>
+\`\`\`
+
+\`status:\` is always line 2 and one of \`open|in_progress|done|blocked\`.
+Use a real clock timestamp for \`created\` (never guess). Give every order
+concrete, narrow boundaries - a worker cycle sees only its one order, not
+the whole mission, so vague scope is the single biggest way an order fails.
+
+## 3. Closing and reopening orders
+
+Never take a worker's own \`status: done\` claim at face value. Before you
+close an order (or leave it closed), run its \`verify:\` command yourself
+AND check its acceptance criteria against the actual state of the
+project. Only mark it \`done\` once you have verified it yourself this
+cycle. If an order claims done but its verify command fails or a criterion
+does not hold, set it back to \`status: open\` (or \`blocked\` with a note
+on why) so a worker cycle picks it up again.
+
+## 4. Groom PLAN.md to mirror the queue
+
+PLAN.md should reflect the order queue at a glance for a human skimming
+it - keep it in sync with orders/ rather than letting the two drift into
+two different sources of truth.
+
+## 5. The scout subagent - effort-scaling
+
+You may dispatch the \`scout\` subagent (Task tool, read-only: Read, Glob,
+Grep, WebSearch, WebFetch - it cannot edit anything) for research,
+auditing, or fact-checking work that helps you plan orders. Scale effort
+to the task, the same rule in every serious multi-agent system that has
+been measured: use 1 scout for a simple lookup, 2-4 scouts for a genuine
+comparison across a few options or areas, and reach for more only when the
+work is truly parallel (auditing many independent areas at once) - never
+spin up scouts for work one would do. Give each scout a detailed, scoped
+brief: its objective, the output format you need back, and the boundaries
+of what it should look at. A vague brief produces shallow, duplicated
+work; a precise one does not.
+
+## 6. Timestamps come from the clock, not the model
+
+Never write a timestamp you did not obtain from the system clock in the
+same task. If you need a timestamp, run a command that reads the real
+clock at that moment and use exactly what it returns.
+
+## 7. Write an UPDATES.md entry
+
+Prepend one short dated entry to UPDATES.md before ending the cycle:
+what changed in the order queue, what worker cycles should pick up next,
+and anything you are uncertain about.
+
+## 8. Commit discipline
+
+Commit only planning artifacts this cycle: orders/, PLAN.md, UPDATES.md.
+Do not touch implementation files - that is not this cycle's job. Never
+force-push. Never rewrite history. Never touch anything under
+.autopilot/ - that directory belongs to the Autopilot runner, not to you.
+
+## 9. Comply with BLOCKED
+
+If a tool call is blocked with a reason prefixed "BLOCKED:", that is a
+hard stop for that action, not an obstacle to route around. Read the
+reason, accept it, and adjust your plan.
+
+## Mission
+
+${prompt}
+`;
+}
+
+// Appended to the work preamble (see runner.js) for a one-order worker
+// cycle in an orchestrated project. The order content is transcribed
+// verbatim so the worker never has to go re-read the orders/ file itself.
+function workerOrderSection(order) {
+  const id = (order && order.id) || '(unknown order id)';
+  const content = (order && order.content) || '';
+  return `## YOUR WORK ORDER (this cycle)
+
+You have exactly ONE work order this cycle: ${id}. Do not pick up a second
+order, and do not consult PLAN.md's general queue - this order is your
+entire scope for the cycle. Its content, verbatim:
+
+${content}
+
+Rules for this order:
+
+1. Touch only files within the order's Boundaries section. If the work
+   genuinely requires going outside them, stop and set status: blocked
+   with a note explaining why instead of expanding scope yourself.
+2. Set status: in_progress in the order file immediately, before you start
+   the work, so a cycle that dies mid-order leaves an honest trace.
+3. Before setting status: done, actually run the order's verify command
+   (if it has one) and check every acceptance criterion yourself - do not
+   claim done on narration alone.
+4. If you cannot complete the order (blocked on a dependency, ambiguous
+   scope, a criterion that cannot be verified), set status: blocked with a
+   short note on why, rather than improvising scope to force it closed.
+5. END the cycle after this order. Do not start a second order even if you
+   finish early - the orchestrator dispatches the next one.
 `;
 }
 
@@ -236,4 +404,6 @@ module.exports = {
   criticPreamble,
   wrapupPreamble,
   injectionSection,
+  orchestratorPreamble,
+  workerOrderSection,
 };

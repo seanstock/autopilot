@@ -251,7 +251,7 @@ function buildGuardSh({ projectDir, includeBlocklist, autopilotHome }) {
 
 // --- cycle_settings.json ------------------------------------------------------
 
-function buildSettings({ projectDir, guardPs1Path, guardShPath, standard, mcpNames }) {
+function buildSettings({ projectDir, guardPs1Path, guardShPath, standard, mcpNames, allowTask }) {
   const guardCommand =
     process.platform === 'win32'
       ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${guardPs1Path}"`
@@ -265,22 +265,28 @@ function buildSettings({ projectDir, guardPs1Path, guardShPath, standard, mcpNam
   // containment - it is what makes a cycle able to work at all - so it is
   // present for containment "off" too.
   const mcpAllows = (mcpNames || []).map((n) => 'mcp__' + String(n));
+  const baseAllow = [
+    'Read',
+    'Glob',
+    'Grep',
+    'Edit',
+    'Write',
+    'TodoWrite',
+    'ToolSearch',
+    'WebSearch',
+    'WebFetch',
+    'Bash',
+    'PowerShell',
+  ].concat(mcpAllows);
+  // v0.3: the orchestrate settings variant additionally allows the Task
+  // tool (read-only scout subagent fan-out from orchestrate/critic
+  // cycles - docs/plans/2026-07-24-goal-loop.md). The base variant used by
+  // work/wrapup cycles never gets Task: mutating work stays serial, one
+  // order per worker cycle, per the design note's recommendation.
   const settings = {
     permissions: {
       defaultMode: 'acceptEdits',
-      allow: [
-        'Read',
-        'Glob',
-        'Grep',
-        'Edit',
-        'Write',
-        'TodoWrite',
-        'ToolSearch',
-        'WebSearch',
-        'WebFetch',
-        'Bash',
-        'PowerShell',
-      ].concat(mcpAllows),
+      allow: allowTask ? baseAllow.concat(['Task']) : baseAllow,
     },
     hooks: {
       PreToolUse: [
@@ -355,6 +361,45 @@ function ensureGit(dir) {
   }
 }
 
+// --- .claude/agents/scout.md (v0.3) --------------------------------------
+//
+// A daemon-generated, read-only research/verification subagent definition,
+// written only when the project has orchestration enabled
+// (project.workerModel set). Frontmatter + body per the exact contract in
+// docs/plans/2026-07-24-goal-loop.md Task P. Lives under the project's
+// .claude/ directory, which cycles cannot write (existing deny rules
+// above) - so a cycle can dispatch the scout via Task but never edit its
+// definition.
+
+const SCOUT_DESCRIPTION =
+  'Read-only research and verification subagent. Use for parallel exploration, auditing, and fact-checking. Never edits files.';
+
+function buildScoutAgentMd() {
+  const lines = [];
+  lines.push('---');
+  lines.push('name: scout');
+  lines.push(`description: ${SCOUT_DESCRIPTION}`);
+  lines.push('tools: Read, Glob, Grep, WebSearch, WebFetch');
+  lines.push('model: sonnet');
+  lines.push('---');
+  lines.push('');
+  lines.push('You are the scout subagent: read-only research, auditing, and');
+  lines.push('fact-checking support for the Autopilot orchestrator cycle that');
+  lines.push('dispatched you. You have no Edit, Write, or Bash access - you cannot');
+  lines.push('change anything, only look.');
+  lines.push('');
+  lines.push('Follow the brief you were given exactly: its stated objective, output');
+  lines.push('format, and boundaries (which files/areas to look at, and no others).');
+  lines.push('Do not wander outside the boundaries you were given.');
+  lines.push('');
+  lines.push('Return dense, cite-backed findings, not a narrative: reference exact');
+  lines.push('file paths and line numbers for every claim, quote the smallest');
+  lines.push('relevant snippet rather than pasting whole files, and say plainly when');
+  lines.push('you did not find something rather than guessing.');
+  lines.push('');
+  return lines.join('\n');
+}
+
 // --- public API ----------------------------------------------------------------
 
 function ensureContainment(project) {
@@ -372,16 +417,38 @@ function ensureContainment(project) {
   util.atomicWrite(guardPs1Path, buildGuardPs1({ projectDir: dir, includeBlocklist: standard, autopilotHome }));
   util.atomicWrite(guardShPath, buildGuardSh({ projectDir: dir, includeBlocklist: standard, autopilotHome }));
 
-  const settings = buildSettings({ projectDir: dir, guardPs1Path, guardShPath, standard, mcpNames: project.mcp });
+  const settings = buildSettings({
+    projectDir: dir,
+    guardPs1Path,
+    guardShPath,
+    standard,
+    mcpNames: project.mcp,
+    allowTask: false,
+  });
+  const orchestrateSettings = buildSettings({
+    projectDir: dir,
+    guardPs1Path,
+    guardShPath,
+    standard,
+    mcpNames: project.mcp,
+    allowTask: true,
+  });
   const settingsPath = path.join(meta, 'cycle_settings.json');
+  const orchestrateSettingsPath = path.join(meta, 'cycle_settings_orchestrate.json');
   util.writeJson(settingsPath, settings);
+  util.writeJson(orchestrateSettingsPath, orchestrateSettings);
 
   ensureGit(dir);
 
-  if (isOff) {
-    return { settingsPath, warning: 'containment off' };
+  if (project.workerModel) {
+    const agentsDir = path.join(dir, '.claude', 'agents');
+    util.atomicWrite(path.join(agentsDir, 'scout.md'), buildScoutAgentMd());
   }
-  return { settingsPath };
+
+  if (isOff) {
+    return { settingsPath, orchestrateSettingsPath, warning: 'containment off' };
+  }
+  return { settingsPath, orchestrateSettingsPath };
 }
 
 module.exports = {

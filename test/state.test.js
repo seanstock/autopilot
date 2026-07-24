@@ -239,6 +239,44 @@ test('I6: addProject accepts and coerces numeric-string values', () => {
   assert.equal(p.criticRatio, 7);
 });
 
+// ---------------------------------------------------------------------------
+// v0.3: verifyCmd / workerModel (optional, validated non-empty strings)
+// ---------------------------------------------------------------------------
+
+test('addProject: accepts verifyCmd and workerModel as non-empty strings', () => {
+  const dir = tempProjectDir();
+  const s = state.load();
+  const p = state.addProject(s, { dir, prompt: 'x', verifyCmd: 'npm test', workerModel: 'claude-haiku-4-5-20251001' });
+  assert.equal(p.verifyCmd, 'npm test');
+  assert.equal(p.workerModel, 'claude-haiku-4-5-20251001');
+});
+
+test('addProject: drops non-string or empty verifyCmd/workerModel, leaving them absent', () => {
+  const dir = tempProjectDir();
+  const s = state.load();
+  const p = state.addProject(s, { dir, prompt: 'x', verifyCmd: '   ', workerModel: 123 });
+  assert.equal(p.verifyCmd, undefined);
+  assert.equal(p.workerModel, undefined);
+});
+
+test('addProject: verifyCmd/workerModel are absent by default', () => {
+  const dir = tempProjectDir();
+  const s = state.load();
+  const p = state.addProject(s, { dir, prompt: 'x' });
+  assert.equal('verifyCmd' in p, false);
+  assert.equal('workerModel' in p, false);
+});
+
+test('save() then load() round-trips verifyCmd and workerModel', () => {
+  const dir = tempProjectDir();
+  const s = state.load();
+  state.addProject(s, { dir, prompt: 'x', verifyCmd: 'npm test', workerModel: 'claude-haiku-4-5-20251001' });
+  state.save(s);
+  const reloaded = state.load();
+  assert.equal(reloaded.projects[0].verifyCmd, 'npm test');
+  assert.equal(reloaded.projects[0].workerModel, 'claude-haiku-4-5-20251001');
+});
+
 test('load() tolerates a dir stored with forward slashes on Windows', () => {
   const home = process.env.AUTOPILOT_HOME_OVERRIDE;
   const dir = tempProjectDir();

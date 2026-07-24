@@ -875,11 +875,227 @@ test('snapshot matches the shared status contract shape', async () => {
   assert.deepEqual(Object.keys(snap.settings).sort(), ['ceilingPct', 'graceMinutes', 'webhook'].sort());
 
   const p = snap.projects[0];
-  for (const key of ['status', 'statusDetail', 'cycle', 'sinceReview', 'lastExit', 'lastCommit', 'pendingInject', 'totals']) {
+  for (const key of ['status', 'statusDetail', 'cycle', 'sinceReview', 'lastExit', 'lastCommit', 'lastVerify', 'pendingInject', 'totals', 'orders']) {
     assert.ok(key in p, `missing ${key} on project snapshot`);
   }
+  assert.equal(p.orders, null, 'orders must be null when the project has no workerModel');
   assert.ok(
     ['running', 'queued', 'sleeping', 'awaiting-review', 'stopped', 'cooldown', 'fatal'].includes(p.status),
     `unexpected status ${p.status}`
   );
+});
+
+// ---------------------------------------------------------------------------
+// v0.3: orchestration kind selection, order routing, verify/order stamping
+// ---------------------------------------------------------------------------
+
+function writeOrder(projectDir, filename, status, extra) {
+  const dir = path.join(projectDir, 'orders');
+  fs.mkdirSync(dir, { recursive: true });
+  const body =
+    `# ${filename}\n` +
+    `status: ${status}\n` +
+    `created: 2026-07-24T00:00:00-07:00 by cycle 1\n` +
+    `verify: ${(extra && extra.verify) || '-'}\n\n` +
+    `## Objective\ndo the thing\n\n` +
+    `## Acceptance criteria\n- [ ] done\n\n` +
+    `## Boundaries\nsrc/\n`;
+  fs.writeFileSync(path.join(dir, filename), body);
+}
+
+test('no workerModel: v0.2 behavior - work kind, no order, project.model passed through unchanged', async () => {
+  const project = makeProject({ criticRatio: 0 });
+  const stateObj = makeStateObj([project]);
+
+  const received = [];
+  const runCycleImpl = async (args) => {
+    received.push(args);
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => received.length >= 1);
+  await sched.stopDaemon();
+
+  assert.equal(received[0].kind, 'work');
+  assert.equal(received[0].order, null);
+  assert.equal(received[0].project.model, 'claude-sonnet-5');
+});
+
+test('orchestration enabled + one open order: work kind, correct order id, effective model is workerModel', async () => {
+  const project = makeProject({ criticRatio: 0, workerModel: 'claude-haiku-4-5-20251001' });
+  writeOrder(project.dir, '001-first.md', 'open');
+  writeOrder(project.dir, '002-second.md', 'open');
+  const stateObj = makeStateObj([project]);
+
+  const received = [];
+  const runCycleImpl = async (args) => {
+    received.push(args);
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => received.length >= 1);
+  await sched.stopDaemon();
+
+  assert.equal(received[0].kind, 'work');
+  assert.ok(received[0].order, 'expected an order to be passed');
+  assert.equal(received[0].order.id, '001-first', 'must pick the lowest-filename open order');
+  assert.match(received[0].order.content, /^# 001-first\.md/);
+  assert.equal(received[0].project.model, 'claude-haiku-4-5-20251001', 'effective model must be workerModel');
+});
+
+test('orchestration enabled + zero open orders: orchestrate kind, project.model (big model)', async () => {
+  const project = makeProject({ criticRatio: 0, workerModel: 'claude-haiku-4-5-20251001', model: 'claude-fable-5' });
+  writeOrder(project.dir, '001-done.md', 'done');
+  writeOrder(project.dir, '002-blocked.md', 'blocked');
+  const stateObj = makeStateObj([project]);
+
+  const received = [];
+  const runCycleImpl = async (args) => {
+    received.push(args);
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => received.length >= 1);
+  await sched.stopDaemon();
+
+  assert.equal(received[0].kind, 'orchestrate');
+  assert.equal(received[0].order, null);
+  assert.equal(received[0].project.model, 'claude-fable-5', 'orchestrate cycles use the big model, not workerModel');
+});
+
+test('critic cadence still fires ahead of order-based work even when orchestration is enabled', async () => {
+  const project = makeProject({ criticRatio: 2, workerModel: 'claude-haiku-4-5-20251001' });
+  writeOrder(project.dir, '001-open.md', 'open');
+  const stateObj = makeStateObj([project]);
+
+  const kinds = [];
+  const runCycleImpl = async ({ kind }) => {
+    kinds.push(kind);
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => kinds.length >= 2);
+  await sched.stopDaemon();
+
+  assert.equal(kinds[0], 'work');
+  assert.equal(kinds[1], 'critic', 'critic cadence must still win over the open order');
+});
+
+test('pending injection forces orchestrate (not work) when orchestration is enabled', async () => {
+  const project = makeProject({ criticRatio: 0, workerModel: 'claude-haiku-4-5-20251001' });
+  writeOrder(project.dir, '001-open.md', 'open');
+  const stateObj = makeStateObj([project]);
+
+  const meta = path.join(project.dir, '.autopilot');
+  fs.mkdirSync(meta, { recursive: true });
+  fs.writeFileSync(path.join(meta, 'INJECT.md'), 'Please replan.\n');
+
+  const kinds = [];
+  const runCycleImpl = async ({ kind }) => {
+    kinds.push(kind);
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => kinds.length >= 1);
+  await sched.stopDaemon();
+
+  assert.equal(kinds[0], 'orchestrate', 'injection must force orchestrate, not work, when orchestration is enabled');
+});
+
+test('cycle_end carries order id and verify verbatim from the fake runCycleImpl result', async () => {
+  const project = makeProject({ criticRatio: 0, workerModel: 'claude-haiku-4-5-20251001' });
+  writeOrder(project.dir, '005-widget.md', 'open');
+  const stateObj = makeStateObj([project]);
+
+  const runCycleImpl = async () => cleanResult({ verify: { cmd: 'npm test', ok: true, code: 0 } });
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => {
+    const evs = events.readEvents(project.dir, 50);
+    return evs.some((e) => e.ev === 'cycle_end');
+  });
+  await sched.stopDaemon();
+
+  const evs = events.readEvents(project.dir, 50);
+  const end = evs.find((e) => e.ev === 'cycle_end');
+  assert.equal(end.order, '005-widget');
+  assert.deepEqual(end.verify, { cmd: 'npm test', ok: true, code: 0 });
+  assert.equal(end.model, 'claude-haiku-4-5-20251001');
+});
+
+test('cycle_end verify is null when the fake result omits it', async () => {
+  const project = makeProject({ criticRatio: 0 });
+  const stateObj = makeStateObj([project]);
+  const runCycleImpl = async () => cleanResult();
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => {
+    const evs = events.readEvents(project.dir, 50);
+    return evs.some((e) => e.ev === 'cycle_end');
+  });
+  await sched.stopDaemon();
+
+  const evs = events.readEvents(project.dir, 50);
+  const end = evs.find((e) => e.ev === 'cycle_end');
+  assert.equal(end.order, null);
+  assert.equal(end.verify, null);
+});
+
+test('totals attribute the effective model (workerModel) for order-driven work cycles', async () => {
+  const project = makeProject({ criticRatio: 0, workerModel: 'claude-haiku-4-5-20251001', model: 'claude-fable-5' });
+  writeOrder(project.dir, '001-open.md', 'open');
+  const stateObj = makeStateObj([project]);
+
+  const runCycleImpl = async () => cleanResult({ tokens: { in: 500, out: 50 }, costUsd: 0.1 });
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => {
+    const rt = state.readRuntime(project.dir);
+    return (rt.totals && rt.totals.cycles) >= 1;
+  });
+  await sched.stopDaemon();
+
+  const runtime = state.readRuntime(project.dir);
+  assert.equal(runtime.totals.byModel['claude-haiku-4-5-20251001'].cycles, 1);
+  assert.equal(runtime.totals.byModel['claude-fable-5'], undefined, 'the big model must not be credited for a worker cycle');
+});
+
+test('snapshot orders counts reflect a temp orders/ dir, null when orchestration disabled', async () => {
+  const orchestrated = makeProject({ workerModel: 'claude-haiku-4-5-20251001', priority: 1 });
+  writeOrder(orchestrated.dir, '001-a.md', 'open');
+  writeOrder(orchestrated.dir, '002-b.md', 'open');
+  writeOrder(orchestrated.dir, '003-c.md', 'in_progress');
+  writeOrder(orchestrated.dir, '004-d.md', 'done');
+  writeOrder(orchestrated.dir, '005-e.md', 'blocked');
+
+  const plain = makeProject({ priority: 1 });
+
+  const stateObj = makeStateObj([orchestrated, plain]);
+  const sched = new Scheduler({
+    stateObj,
+    budget: makeBudget(),
+    runCycleImpl: async () => cleanResult(),
+    notifyImpl: () => {},
+    tickMs: 1000,
+  });
+
+  const snap = sched.snapshot();
+  const orchSnap = snap.projects.find((p) => p.id === orchestrated.id);
+  const plainSnap = snap.projects.find((p) => p.id === plain.id);
+
+  assert.deepEqual(orchSnap.orders, { open: 2, inProgress: 1, done: 1, blocked: 1 });
+  assert.equal(plainSnap.orders, null);
 });

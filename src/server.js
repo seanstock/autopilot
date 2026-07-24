@@ -101,6 +101,50 @@ function findProject(scheduler, id) {
   return projects.find((p) => p.id === id) || null;
 }
 
+// Shared contracts (v0.3): GET /api/projects/:id/orders reads
+// <dir>/orders/*.md - path-safe (only filenames matching this pattern,
+// no separators/traversal), parses title (first line minus '# ') and
+// status (scan the first 10 lines for the status: line), sorted by id
+// (filename without extension). Orders are model-written project files;
+// treat their content as untrusted just like PLAN.md/UPDATES.md.
+const ORDER_FILENAME_RE = /^[\w-]+\.md$/i;
+const ORDER_STATUS_RE = /^status:\s*(open|in_progress|done|blocked)\b/;
+
+function readOrders(dir) {
+  const ordersDir = path.join(dir, 'orders');
+  let names;
+  try {
+    names = fs.readdirSync(ordersDir);
+  } catch (err) {
+    return [];
+  }
+  const orders = [];
+  for (const name of names) {
+    if (!ORDER_FILENAME_RE.test(name)) continue;
+    const filePath = path.join(ordersDir, name);
+    let content;
+    try {
+      content = fs.readFileSync(filePath, 'utf8');
+    } catch (err) {
+      continue;
+    }
+    const lines = content.split(/\r?\n/);
+    const titleLine = lines[0] || '';
+    const title = titleLine.replace(/^#\s*/, '').trim();
+    let status = 'open';
+    for (let i = 0; i < Math.min(10, lines.length); i++) {
+      const m = lines[i].match(ORDER_STATUS_RE);
+      if (m) {
+        status = m[1];
+        break;
+      }
+    }
+    orders.push({ id: name.replace(/\.md$/i, ''), title, status });
+  }
+  orders.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return orders;
+}
+
 function startServer({ scheduler, port }) {
   const sseClients = new Set();
 
@@ -245,6 +289,13 @@ function startServer({ scheduler, port }) {
       if (!project) return sendJson(res, 404, { error: 'project not found' });
       const limit = parseInt(query.get('limit'), 10);
       return sendJson(res, 200, { events: events.readEvents(project.dir, Number.isFinite(limit) ? limit : 100) });
+    }
+
+    m = pathname.match(/^\/api\/projects\/([^/]+)\/orders$/);
+    if (m && method === 'GET') {
+      const project = findProject(scheduler, m[1]);
+      if (!project) return sendJson(res, 404, { error: 'project not found' });
+      return sendJson(res, 200, { orders: readOrders(project.dir) });
     }
 
     m = pathname.match(/^\/api\/projects\/([^/]+)\/file$/);

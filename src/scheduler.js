@@ -93,6 +93,74 @@ function reviewedFilePath(dir) {
   return path.join(util.projectMeta(dir), 'REVIEWED');
 }
 
+// ---- v0.3 orders/ (docs/plans/2026-07-24-goal-loop.md Shared contracts) ----
+// Orders are disposable, model-written project files living in
+// <project>/orders/*.md. Parsing rule everywhere: scan the first 10 lines
+// for /^status:\s*(open|in_progress|done|blocked)\b/. Sort by filename
+// (zero-padded NNN-slug.md keeps that lexical order == creation order).
+const ORDER_STATUS_RE = /^status:\s*(open|in_progress|done|blocked)\b/;
+
+function ordersDirPath(dir) {
+  return path.join(dir, 'orders');
+}
+
+function parseOrderStatus(content) {
+  const lines = String(content).split(/\r?\n/).slice(0, 10);
+  for (const line of lines) {
+    const m = ORDER_STATUS_RE.exec(line);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+// Malformed order files (no parseable status line in the first 10 lines)
+// default to 'open' - matching the server's readOrders, so the scheduler
+// and the UI never disagree about the same file. Fail-open into
+// VISIBILITY: an order the planner wrote slightly off-format becomes
+// assignable work the next worker (or orchestrator grooming pass) will
+// see and normalize, instead of silently vanishing from both the queue
+// and the snapshot counts.
+function listOrders(dir) {
+  let files;
+  try {
+    files = fs.readdirSync(ordersDirPath(dir)).filter((f) => /\.md$/i.test(f));
+  } catch (err) {
+    return [];
+  }
+  files.sort();
+  const out = [];
+  for (const f of files) {
+    let content;
+    try {
+      content = fs.readFileSync(path.join(ordersDirPath(dir), f), 'utf8');
+    } catch (err) {
+      continue;
+    }
+    const status = parseOrderStatus(content) || 'open';
+    out.push({ id: f.replace(/\.md$/i, ''), filename: f, status, content });
+  }
+  return out;
+}
+
+function findLowestOpenOrder(dir) {
+  const orders = listOrders(dir);
+  for (const o of orders) {
+    if (o.status === 'open') return o;
+  }
+  return null;
+}
+
+function orderCounts(dir) {
+  const counts = { open: 0, inProgress: 0, done: 0, blocked: 0 };
+  for (const o of listOrders(dir)) {
+    if (o.status === 'open') counts.open += 1;
+    else if (o.status === 'in_progress') counts.inProgress += 1;
+    else if (o.status === 'done') counts.done += 1;
+    else if (o.status === 'blocked') counts.blocked += 1;
+  }
+  return counts;
+}
+
 // EPERM means a process with that pid exists but signal permission was
 // denied (still alive); ESRCH (the default thrown error on most platforms
 // for a nonexistent pid) means it is not.
@@ -448,12 +516,44 @@ class Scheduler extends EventEmitter {
   async _runOneCycle(project, runtime, forcedKind) {
     const cycleNumber = (runtime.cycle || 0) + 1;
     const criticRatio = project.criticRatio || 0;
-    // A pending user directive (INJECT.md) forces the next cycle to be a
-    // work cycle even if the critic cadence lands here - the human asked
-    // for it "next run", and only work cycles consume injections. The
-    // critic simply fires on its next matching cycle number.
+    // v0.3 kind-selection priority (docs/plans/2026-07-24-goal-loop.md Shared
+    // contracts, "Kind selection"), in exact order:
+    //   1. forcedKind (wrapup) wins.
+    //   2. Pending INJECT.md -> orchestrate if orchestration is enabled
+    //      (project.workerModel set), else work (v0.2 behavior) - only work
+    //      cycles without an order consume injections; an orchestrated
+    //      project instead lets the planner triage the directive.
+    //   3. Critic cadence -> critic, unchanged, applies in orchestrated
+    //      projects too.
+    //   4. Enabled + at least one open order -> work with the lowest-filename
+    //      open order, effective model = workerModel.
+    //   5. Enabled + zero open orders -> orchestrate (project.model).
+    //   6. Not enabled -> work (v0.2 behavior, byte-identical).
+    const orchestrationEnabled = !!project.workerModel;
     const injectPending = !forcedKind && fs.existsSync(injectFilePath(project.dir));
-    const kind = forcedKind || (!injectPending && criticRatio > 0 && cycleNumber % criticRatio === 0 ? 'critic' : 'work');
+
+    let kind;
+    let order = null;
+    let effectiveModel = project.model;
+
+    if (forcedKind) {
+      kind = forcedKind;
+    } else if (injectPending) {
+      kind = orchestrationEnabled ? 'orchestrate' : 'work';
+    } else if (criticRatio > 0 && cycleNumber % criticRatio === 0) {
+      kind = 'critic';
+    } else if (orchestrationEnabled) {
+      const openOrder = findLowestOpenOrder(project.dir);
+      if (openOrder) {
+        kind = 'work';
+        order = openOrder;
+        effectiveModel = project.workerModel;
+      } else {
+        kind = 'orchestrate';
+      }
+    } else {
+      kind = 'work';
+    }
 
     // Seed totals BEFORE this cycle's cycle_end lands in events.jsonl, or
     // the backfill would double-count it.
@@ -468,11 +568,19 @@ class Scheduler extends EventEmitter {
       util.log('scheduler: appendEvent cycle_start failed', String(err && err.message));
     }
 
+    // Effective model routing (docs/plans Task S): a work cycle carrying an
+    // order runs against workerModel, not project.model - the scheduler
+    // passes `{...project, model: effectiveModel}` down, so everything
+    // downstream (the runner's spawn, and this function's own totals/
+    // cycle_end stamping) sees the model actually used for the cycle.
+    const cycleProject = order ? Object.assign({}, project, { model: effectiveModel }) : project;
+
     let result;
     try {
       result = await this.runCycleImpl({
-        project,
+        project: cycleProject,
         kind,
+        order: order ? { id: order.id, content: order.content } : null,
         cycleNumber,
         budget: this.budget,
         claudeCmd: project.claudeCmd,
@@ -489,6 +597,7 @@ class Scheduler extends EventEmitter {
         costUsd: null,
         commit: null,
         gitDiff: { files: 0, ins: 0, del: 0 },
+        verify: null,
       };
     }
 
@@ -496,7 +605,9 @@ class Scheduler extends EventEmitter {
       events.appendEvent(project.dir, project.id, 'cycle_end', {
         cycle: cycleNumber,
         kind,
-        model: project.model,
+        model: effectiveModel,
+        order: order ? order.id : null,
+        verify: result.verify != null ? result.verify : null,
         minutes: result.minutes,
         exit: result.exit,
         code: result.code,
@@ -525,7 +636,7 @@ class Scheduler extends EventEmitter {
 
     runtime.cycle = cycleNumber;
     runtime.sinceReview = (runtime.sinceReview || 0) + 1;
-    addCycleToTotals(runtime.totals, project.model, result.tokens, result.costUsd);
+    addCycleToTotals(runtime.totals, effectiveModel, result.tokens, result.costUsd);
 
     if (result.exit === 'crash') {
       const now = Date.now();
@@ -549,7 +660,11 @@ class Scheduler extends EventEmitter {
     }
 
     state.writeRuntime(project.dir, runtime);
-    this._lastCycleInfo[project.id] = { lastExit: result.exit, lastCommit: result.commit };
+    this._lastCycleInfo[project.id] = {
+      lastExit: result.exit,
+      lastCommit: result.commit,
+      lastVerify: result.verify != null ? result.verify : null,
+    };
     this._current = null;
 
     // Cap summary (user directive 2026-07-23): when a chain dies of usage
@@ -638,6 +753,18 @@ class Scheduler extends EventEmitter {
     } catch (err) {
       // best effort
     }
+    // v0.3 snapshot additions: orders counts are null when orchestration is
+    // disabled for the project (no workerModel); lastVerify mirrors the most
+    // recent cycle_end's verify field, kept in _lastCycleInfo alongside
+    // lastExit/lastCommit.
+    let orders = null;
+    if (project.workerModel) {
+      try {
+        orders = orderCounts(project.dir);
+      } catch (err) {
+        orders = { open: 0, inProgress: 0, done: 0, blocked: 0 };
+      }
+    }
     return {
       status,
       statusDetail,
@@ -645,8 +772,10 @@ class Scheduler extends EventEmitter {
       sinceReview: runtime.sinceReview,
       lastExit: info.lastExit || null,
       lastCommit: info.lastCommit || null,
+      lastVerify: info.lastVerify || null,
       pendingInject,
       totals: runtime.totals,
+      orders,
     };
   }
 
@@ -660,6 +789,14 @@ class Scheduler extends EventEmitter {
       if (fatalRecord) {
         const runtime = state.readRuntime(project.dir);
         const info = this._lastCycleInfo[project.id] || {};
+        let orders = null;
+        if (project.workerModel) {
+          try {
+            orders = orderCounts(project.dir);
+          } catch (err) {
+            orders = { open: 0, inProgress: 0, done: 0, blocked: 0 };
+          }
+        }
         return Object.assign(base, {
           status: 'fatal',
           statusDetail: 'fatal latched',
@@ -667,6 +804,8 @@ class Scheduler extends EventEmitter {
           sinceReview: runtime.sinceReview,
           lastExit: info.lastExit || null,
           lastCommit: info.lastCommit || null,
+          lastVerify: info.lastVerify || null,
+          orders,
         });
       }
       return Object.assign(base, this._projectStatus(project));

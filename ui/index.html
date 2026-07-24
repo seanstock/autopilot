@@ -118,6 +118,10 @@
   .chip.sleeping { color: var(--warning); border-color: rgba(251,191,36,.25); } .chip.sleeping::before { background: var(--warning); }
   .chip.cooldown { color: var(--warning); border-color: rgba(251,191,36,.25); } .chip.cooldown::before { background: var(--warning); }
   .chip.fatal { color: var(--accent); border-color: rgba(224,53,53,.35); } .chip.fatal::before { background: var(--accent); }
+  .chip.accent { color: var(--accent); border-color: rgba(224,53,53,.35); } .chip.accent::before { background: var(--accent); }
+  .chip.warn { color: var(--warning); border-color: rgba(251,191,36,.25); } .chip.warn::before { background: var(--warning); }
+  .chip.success { color: var(--success); border-color: rgba(74,222,128,.25); } .chip.success::before { background: var(--success); }
+  .chip.secondary { color: var(--text-secondary); }
   .p-actions { display: flex; gap: 8px; margin: 12px 0 0 22px; }
   .p-actions button { font-size: 11px; padding: 3px 10px; }
   .p-links { margin: 8px 0 0 22px; font-size: 11px; display: flex; gap: 16px; }
@@ -366,6 +370,10 @@ async function mockGet(url) {
     const name = u.searchParams.get('name');
     const content = p && p._mock ? (name === 'PLAN.md' ? p._mock.planMd : p._mock.updatesMd) : '';
     return { name, content };
+  }
+  if ((m = path.match(/\/api\/projects\/([^/]+)\/orders$/))) {
+    const p = mockFindProject(decodeURIComponent(m[1]));
+    return { orders: p && p._mock && p._mock.orders ? p._mock.orders : [] };
   }
   console.warn('[mock] unhandled GET', url);
   return {};
@@ -684,17 +692,18 @@ function findProject(id) {
 async function selectProject(id) {
   selectedId = id;
   tailLines = [];
-  detailCache = { events: [], updatesMd: '', planMd: '', injectText: '' };
+  detailCache = { events: [], updatesMd: '', planMd: '', injectText: '', orders: [] };
   document.querySelectorAll('.proj').forEach(el => el.classList.remove('sel'));
   renderProjectListSelectionOnly();
   renderDetailShell(true);
   try {
-    const [activityRes, eventsRes, updatesRes, planRes, injectRes] = await Promise.all([
+    const [activityRes, eventsRes, updatesRes, planRes, injectRes, ordersRes] = await Promise.all([
       apiGet('/api/projects/' + encodeURIComponent(id) + '/activity?lines=200'),
       apiGet('/api/projects/' + encodeURIComponent(id) + '/events?limit=100'),
       apiGet('/api/projects/' + encodeURIComponent(id) + '/file?name=UPDATES.md'),
       apiGet('/api/projects/' + encodeURIComponent(id) + '/file?name=PLAN.md'),
-      apiGet('/api/projects/' + encodeURIComponent(id) + '/inject').catch(() => ({ text: '' }))
+      apiGet('/api/projects/' + encodeURIComponent(id) + '/inject').catch(() => ({ text: '' })),
+      apiGet('/api/projects/' + encodeURIComponent(id) + '/orders').catch(() => ({ orders: [] }))
     ]);
     if (id !== selectedId) return; // user picked something else meanwhile
     tailLines = (activityRes.lines || []).slice(-500);
@@ -702,7 +711,8 @@ async function selectProject(id) {
       events: eventsRes.events || [],
       updatesMd: updatesRes.content || '',
       planMd: planRes.content || '',
-      injectText: injectRes.text || ''
+      injectText: injectRes.text || '',
+      orders: ordersRes.orders || []
     };
     renderDetailShell(false);
   } catch (e) {
@@ -796,10 +806,11 @@ function renderDetailShell(loading, errorMsg) {
     <div class="card">
       <h3>Cycle history <span class="sub">.autopilot/events.jsonl</span></h3>
       <table>
-        <tr><th class="num">cycle</th><th>kind</th><th class="num">min</th><th>exit</th><th class="num">tokens in/out</th><th class="num">diff</th><th>commit</th></tr>
+        <tr><th class="num">cycle</th><th>kind</th><th class="num">min</th><th>exit</th><th>gate</th><th class="num">tokens in/out</th><th class="num">diff</th><th>commit</th></tr>
         ${cycleRows}
       </table>
     </div>
+    ${renderOrdersCard(p)}
     ${renderInvestedCard(p)}
     <div class="card">
       <h3>Plan <span class="sub">PLAN.md &middot; read-only</span></h3>
@@ -822,6 +833,7 @@ function buildCycleRows(p) {
       <td><span class="exit">running</span></td>
       <td class="num">&mdash;</td>
       <td class="num">&mdash;</td>
+      <td class="num">&mdash;</td>
       <td></td>
     </tr>`);
   }
@@ -836,13 +848,50 @@ function buildCycleRows(p) {
       <td class="${c.kind === 'critic' ? 'kind-critic' : ''}">${escapeHtml(c.kind)}</td>
       <td class="num">${c.minutes != null ? c.minutes.toFixed ? c.minutes.toFixed(1) : c.minutes : ''}</td>
       <td><span class="exit ${escapeHtml(c.exit)}">${escapeHtml(c.exit)}</span></td>
+      <td class="num">${renderGateCell(c.verify)}</td>
       <td class="num">${tok}</td>
       <td class="num">${diff}</td>
       <td>${c.commit ? escapeHtml(c.commit) : ''}</td>
     </tr>`);
   });
-  if (!rows.length) return '<tr><td colspan="7" class="empty-note">(no cycles yet)</td></tr>';
+  if (!rows.length) return '<tr><td colspan="8" class="empty-note">(no cycles yet)</td></tr>';
   return rows.join('');
+}
+
+// gate column: verify is {cmd, ok, code} | null on cycle_end events (Task R/S
+// contract). No verifyCmd configured for the project -> dash. Configured and
+// passed -> check (success color). Configured and failed -> cross (accent).
+function renderGateCell(verify) {
+  if (!verify) return '<span style="color:var(--text-secondary)">&mdash;</span>';
+  return verify.ok
+    ? '<span style="color:var(--success)">&check;</span>'
+    : '<span style="color:var(--accent)">&cross;</span>';
+}
+
+// Orders card: only rendered when project.orders is non-null (orchestration
+// enabled for this project per the v0.3 snapshot contract). Status chip
+// classes per the plan: open=accent, in_progress=warn, done=success,
+// blocked=secondary.
+const ORDER_CHIP_CLS = { open: 'accent', in_progress: 'warn', done: 'success', blocked: 'secondary' };
+
+function renderOrdersCard(p) {
+  if (p.orders == null) return '';
+  const list = detailCache.orders || [];
+  const counts = p.orders;
+  const rows = list.map(o => `
+    <tr>
+      <td>${escapeHtml(o.id)}</td>
+      <td>${escapeHtml(o.title)}</td>
+      <td><span class="chip ${ORDER_CHIP_CLS[o.status] || ''}">${escapeHtml(o.status)}</span></td>
+    </tr>`).join('');
+  return `
+    <div class="card">
+      <h3>Orders <span class="sub">${counts.open} open &middot; ${counts.inProgress} in progress &middot; ${counts.done} done &middot; ${counts.blocked} blocked</span></h3>
+      <table>
+        <tr><th>id</th><th>title</th><th>status</th></tr>
+        ${rows || '<tr><td colspan="3" class="empty-note">(no orders)</td></tr>'}
+      </table>
+    </div>`;
 }
 
 /* keep only the d-head (config/status) fresh on every status tick without
