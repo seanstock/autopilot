@@ -14,7 +14,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFileSync, spawnSync } = require('child_process');
 
 const util = require('./util');
 const events = require('./events');
@@ -196,18 +196,70 @@ function safeEnsureContainment(project) {
     return containment.ensureContainment(project);
   } catch (err) {
     util.log('runner: ensureContainment failed for', project && project.dir, String(err && err.message));
-    return { settingsPath: null };
+    return { settingsPath: null, orchestrateSettingsPath: null };
   }
 }
 
-function buildPreamble(project, kind) {
+function buildPreamble(project, kind, order) {
   try {
     if (kind === 'critic') return preambles.criticPreamble(project);
     if (kind === 'wrapup') return preambles.wrapupPreamble(project);
-    return preambles.workPreamble(project);
+    if (kind === 'orchestrate') return preambles.orchestratorPreamble(project);
+    let base = preambles.workPreamble(project);
+    if (order) {
+      base = `${base}\n${preambles.workerOrderSection(order)}`;
+    }
+    return base;
   } catch (err) {
     util.log('runner: preamble build failed', String(err && err.message));
     return '';
+  }
+}
+
+// Runs project.verifyCmd (if set) after the cycle's child has exited and
+// BEFORE auto-commit (Shared contracts: "Verify gate"). cwd is the project
+// dir, env is stripped the same way as the cycle's own child, 10-minute
+// timeout by default (overridable via project.verifyTimeoutMs, test-only),
+// `cmd /c` on win32 / `sh -c` on posix. Never throws; a timeout counts as
+// {ok:false, code:null}; absent verifyCmd returns null.
+function runVerifyGate(project) {
+  const cmdStr = project && project.verifyCmd;
+  if (!cmdStr) return null;
+
+  const timeoutMs =
+    typeof project.verifyTimeoutMs === 'number' && project.verifyTimeoutMs > 0
+      ? project.verifyTimeoutMs
+      : 10 * 60 * 1000;
+
+  const env = Object.assign({}, process.env);
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+
+  const bin = process.platform === 'win32' ? 'cmd' : 'sh';
+  // /d /s /c plus windowsVerbatimArguments: cmd.exe's own quote-stripping
+  // rules otherwise collide with Node's array-arg auto-escaping and mangle
+  // any verifyCmd containing embedded double quotes (e.g. `node -e "..."`).
+  const args = process.platform === 'win32' ? ['/d', '/s', '/c', cmdStr] : ['-c', cmdStr];
+
+  try {
+    const res = spawnSync(bin, args, {
+      cwd: project.dir,
+      windowsHide: true,
+      env,
+      timeout: timeoutMs,
+      stdio: 'ignore',
+      windowsVerbatimArguments: process.platform === 'win32',
+    });
+    if (res.error) {
+      // Includes ETIMEDOUT and spawn failures alike - both are "verify did
+      // not succeed", not a reason to throw.
+      return { cmd: cmdStr, ok: false, code: null };
+    }
+    const code = typeof res.status === 'number' ? res.status : null;
+    return { cmd: cmdStr, ok: code === 0, code };
+  } catch (err) {
+    util.log('runner: verifyCmd execution failed for', project && project.dir, String(err && err.message));
+    return { cmd: cmdStr, ok: false, code: null };
   }
 }
 
@@ -217,8 +269,13 @@ function buildPreamble(project, kind) {
 // forces the next cycle to be work while an injection is pending). On
 // consumption the text is archived to .autopilot/injections.log and the
 // file is cleared, so a directive is delivered exactly once.
-function consumeInjection(project, kind, cycleNumber) {
-  if (kind !== 'work') return null;
+function consumeInjection(project, kind, cycleNumber, order) {
+  // A worker cycle carrying an order must not consume INJECT.md - the
+  // scheduler routes pending injections to an orchestrate cycle instead
+  // (docs/plans/2026-07-24-goal-loop.md); this is the backstop in case a
+  // work cycle is ever dispatched with an order while an injection is
+  // still pending.
+  if (kind !== 'work' || order) return null;
   const injectPath = path.join(util.projectMeta(project.dir), 'INJECT.md');
   let text = null;
   try {
@@ -283,29 +340,41 @@ function resultInfoFrom(parsedLine) {
  *
  * @param {object} opts
  * @param {object} opts.project - project config (dir, model, prompt, maxCycleMinutes, ...).
- * @param {'work'|'critic'} opts.kind
+ * @param {'work'|'critic'|'wrapup'|'orchestrate'} opts.kind
  * @param {number} opts.cycleNumber - used only in the auto-commit message.
  * @param {object} opts.budget - only .scanForTripwire(text) and
  *   .noteUsageLimitExit() are called; inject a mock in tests.
+ * @param {{id:string, content:string}|null} [opts.order] - the scheduler
+ *   ALWAYS passes this (null when absent); a work cycle with an order gets
+ *   the order section appended to its preamble instead of PLAN.md triage,
+ *   and does not consume a pending INJECT.md this cycle.
  * @param {string[]} [opts.claudeCmd] - command + leading args, e.g.
  *   ['cmd','/c','claude'] or [process.execPath, 'test/fake-claude.js'].
  *   Defaults to ['cmd','/c','claude'] on win32, ['claude'] elsewhere.
  * @returns {Promise<{exit:string, code:number|null, minutes:number,
  *   tokens:{in:number,out:number}, costUsd:number|null,
- *   commit:string|null, gitDiff:{files:number,ins:number,del:number}}>}
+ *   commit:string|null, gitDiff:{files:number,ins:number,del:number},
+ *   verify:{cmd:string, ok:boolean, code:number|null}|null}>}
  *   Never rejects/throws - every failure folds into this return shape.
  */
 async function runCycle(opts) {
   const { project, kind, cycleNumber, budget } = opts || {};
+  const order = opts && opts.order ? opts.order : null;
   const dir = project.dir;
   const startedAt = Date.now();
 
-  const { settingsPath } = safeEnsureContainment(project);
+  const { settingsPath, orchestrateSettingsPath } = safeEnsureContainment(project);
+  // Settings selection by kind: orchestrate and critic cycles run with the
+  // orchestrate variant (Task tool allowed), falling back to the base
+  // settings if containment generation didn't produce one; work/wrapup
+  // always use the base variant.
+  const effectiveSettingsPath =
+    kind === 'orchestrate' || kind === 'critic' ? orchestrateSettingsPath || settingsPath : settingsPath;
   const preHead = gitRevParseHead(dir);
-  let preamble = buildPreamble(project, kind);
-  const injection = consumeInjection(project, kind, cycleNumber);
+  let preamble = buildPreamble(project, kind, order);
+  const injection = consumeInjection(project, kind, cycleNumber, order);
   if (injection) {
-    preamble = `${preamble}\n${preambles.injectionSection(injection)}`;
+    preamble = `${preamble}\n${preambles.injectionSection(injection, !!project.workerModel)}`;
   }
 
   const cmd = opts.claudeCmd && opts.claudeCmd.length ? opts.claudeCmd : defaultClaudeCmd();
@@ -317,7 +386,7 @@ async function runCycle(opts) {
     '--permission-mode',
     'acceptEdits',
     '--settings',
-    settingsPath,
+    effectiveSettingsPath,
     '--output-format',
     'stream-json',
     '--verbose',
@@ -476,6 +545,14 @@ async function runCycle(opts) {
     exit = 'unknown';
   }
 
+  let verify = null;
+  try {
+    verify = runVerifyGate(project);
+  } catch (err) {
+    util.log('runner: verify gate failed for', dir, String(err && err.message));
+    verify = null;
+  }
+
   let commit = null;
   let gitDiff = { files: 0, ins: 0, del: 0 };
   try {
@@ -493,6 +570,7 @@ async function runCycle(opts) {
     costUsd: resultInfo ? resultInfo.costUsd : null,
     commit,
     gitDiff,
+    verify,
   };
 }
 

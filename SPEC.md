@@ -53,9 +53,13 @@ ONLY OS-level scheduling in the system.
   "criticRatio": 5,
   "reviewGateCycles": 0,
   "containment": "standard",
-  "mcp": ["blender"]
+  "mcp": ["blender"],
+  "verifyCmd": "npm test",
+  "workerModel": "claude-sonnet-5"
 }
 ```
+`verifyCmd` and `workerModel` are optional; `workerModel`'s presence
+enables orchestration (see Orchestration below).
 `mcp` lists the MCP server names the project's cycles may use (allowed as
 `mcp__<name>` in the generated settings; the servers themselves come from
 the user's own Claude Code config).
@@ -115,6 +119,31 @@ the project's living spec first and then do it (complex: multi-task or
 scope/architecture implications). Consumed injections are archived to
 `.autopilot/injections.log`, stamped as an `inject` event, and noted in
 UPDATES.md. Multiple injections stack until consumed.
+
+**Orchestration (v0.3, optional per project).** Setting `workerModel`
+turns a project's loop into orchestrator + workers. An **orchestrate
+cycle** (the project's main `model`, the big one) does no implementation:
+it maintains `<project>/orders/` - one markdown file per work order
+(`NNN-slug.md`, `status: open|in_progress|done|blocked` on line 2, with
+objective, acceptance criteria, a verify command, and file boundaries) -
+closing orders only after running their gates itself, regenerating the
+queue when it drifts (orders are disposable), and grooming PLAN.md to
+match. A **worker cycle** (`workerModel`, the cheap one) gets exactly ONE
+order embedded in its preamble and ends after it. Scheduler rule: open
+orders -> worker; none -> orchestrate; critic cadence unchanged; a
+pending injection routes to the next orchestrate cycle (directives are
+triaged by the planner). Orchestrate and critic cycles run with a
+settings variant that additionally allows the Task tool plus a generated
+read-only `scout` subagent (Read/Glob/Grep/WebSearch/WebFetch, Sonnet)
+for parallel research and verification fan-out - subagent usage is
+included in the cycle's reported cost (verified empirically via
+stream-json `modelUsage`). Workers get no subagents.
+
+**Verify gate (v0.3, optional per project).** `verifyCmd` is a shell
+command the RUNNER executes after every cycle (before auto-commit, 10 min
+timeout): the result lands in cycle_end as `verify: {cmd, ok, code}`.
+Ground truth about "does it still pass" comes from the runner's own
+execution, never from the model's claims.
 
 **Critic cycle.** If `criticRatio` = N > 0, every Nth cycle gets the critic
 preamble instead: do no new work; independently re-derive and try to REFUTE

@@ -318,6 +318,154 @@ test('child env lacks ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN even when set in 
 // never throws
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// v0.3: work orders
+// ---------------------------------------------------------------------------
+
+test('order section reaches child stdin and INJECT.md is NOT consumed when order present', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir, { workerModel: 'claude-haiku-5' });
+  const budget = mockBudget();
+
+  const meta = path.join(dir, '.autopilot');
+  fs.mkdirSync(meta, { recursive: true });
+  fs.writeFileSync(path.join(meta, 'INJECT.md'), 'Please add a star field to the project.\n');
+
+  const order = { id: '001-add-login-form', content: '# Add login form\nstatus: open\n' };
+
+  await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'work', cycleNumber: 9, budget, claudeCmd: fakeCmd(), order })
+  );
+
+  const received = fs.readFileSync(path.join(dir, 'received_prompt.txt'), 'utf8');
+  assert.match(received, /YOUR WORK ORDER/);
+  assert.match(received, /001-add-login-form/);
+  assert.match(received, /Add login form/);
+
+  // Order cycles must not consume a pending injection this cycle.
+  assert.doesNotMatch(received, /star field/);
+  assert.equal(fs.existsSync(path.join(meta, 'INJECT.md')), true, 'INJECT.md must survive when an order is present');
+});
+
+// ---------------------------------------------------------------------------
+// v0.3: settings variant selection by kind
+// ---------------------------------------------------------------------------
+
+function argvSeen(dir) {
+  const seen = JSON.parse(fs.readFileSync(path.join(dir, 'env_seen.json'), 'utf8'));
+  return seen.argv || [];
+}
+
+function settingsArgFrom(argv) {
+  const idx = argv.indexOf('--settings');
+  return idx === -1 ? null : argv[idx + 1];
+}
+
+test('orchestrate kind: orchestrate settings file passed to child, orchestratorPreamble text in stdin', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir, { workerModel: 'claude-haiku-5', prompt: 'ORCHESTRATE_MISSION_MARKER' });
+  const budget = mockBudget();
+
+  await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'orchestrate', cycleNumber: 1, budget, claudeCmd: fakeCmd() })
+  );
+
+  const settingsArg = settingsArgFrom(argvSeen(dir));
+  assert.match(settingsArg, /cycle_settings_orchestrate\.json$/);
+
+  const received = fs.readFileSync(path.join(dir, 'received_prompt.txt'), 'utf8');
+  assert.match(received, /ORCHESTRATE cycle/);
+  assert.match(received, /ORCHESTRATE_MISSION_MARKER/);
+});
+
+test('critic kind: orchestrate settings file passed to child', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir, { workerModel: 'claude-haiku-5' });
+  const budget = mockBudget();
+
+  await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'critic', cycleNumber: 1, budget, claudeCmd: fakeCmd() })
+  );
+
+  const settingsArg = settingsArgFrom(argvSeen(dir));
+  assert.match(settingsArg, /cycle_settings_orchestrate\.json$/);
+});
+
+test('work kind: base settings file passed to child', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir, { workerModel: 'claude-haiku-5' });
+  const budget = mockBudget();
+
+  await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'work', cycleNumber: 1, budget, claudeCmd: fakeCmd() })
+  );
+
+  const settingsArg = settingsArgFrom(argvSeen(dir));
+  assert.match(settingsArg, /cycle_settings\.json$/);
+  assert.doesNotMatch(settingsArg, /orchestrate/);
+});
+
+// ---------------------------------------------------------------------------
+// v0.3: verifyCmd gate
+// ---------------------------------------------------------------------------
+
+function nodeExitCmd(code) {
+  return `node -e "process.exit(${code})"`;
+}
+
+test('verifyCmd absent: verify is null', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir);
+  const budget = mockBudget();
+
+  const result = await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'work', cycleNumber: 1, budget, claudeCmd: fakeCmd() })
+  );
+
+  assert.equal(result.verify, null);
+});
+
+test('verifyCmd exit 0: verify.ok is true', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir, { verifyCmd: nodeExitCmd(0) });
+  const budget = mockBudget();
+
+  const result = await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'work', cycleNumber: 1, budget, claudeCmd: fakeCmd() })
+  );
+
+  assert.deepEqual(result.verify, { cmd: project.verifyCmd, ok: true, code: 0 });
+});
+
+test('verifyCmd exit 1: verify.ok is false, code 1, and auto-commit still happens', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir, { verifyCmd: nodeExitCmd(1) });
+  const budget = mockBudget();
+
+  const result = await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'work', cycleNumber: 1, budget, claudeCmd: fakeCmd() })
+  );
+
+  assert.equal(result.verify.ok, false);
+  assert.equal(result.verify.code, 1);
+  assert.ok(result.commit, 'verify failure must not prevent auto-commit');
+});
+
+test('verifyCmd timeout: verify.ok false, code null, via project.verifyTimeoutMs override', async () => {
+  const dir = tempProjectRepo();
+  const sleepCmd =
+    process.platform === 'win32' ? 'node -e "setTimeout(function(){}, 60000)"' : 'sleep 60';
+  const project = baseProject(dir, { verifyCmd: sleepCmd, verifyTimeoutMs: 500 });
+  const budget = mockBudget();
+
+  const result = await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'work', cycleNumber: 1, budget, claudeCmd: fakeCmd() })
+  );
+
+  assert.equal(result.verify.ok, false);
+  assert.equal(result.verify.code, null);
+});
+
 test('runCycle never throws even when claudeCmd points at a nonexistent binary', async () => {
   const dir = tempProjectRepo();
   const project = baseProject(dir, { maxCycleMinutes: 1 });

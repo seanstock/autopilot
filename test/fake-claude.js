@@ -50,6 +50,7 @@ async function main() {
       JSON.stringify({
         ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || null,
         ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN || null,
+        argv: process.argv.slice(2),
       })
     );
   } catch (err) {
