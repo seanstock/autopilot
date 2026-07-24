@@ -72,6 +72,34 @@ function emptyTotals() {
   return { in: 0, out: 0, costUsd: 0, cycles: 0, byModel: {} };
 }
 
+// When the runner captured a per-model breakdown (stream-json modelUsage,
+// which includes subagent activity - e.g. a Fable orchestrate cycle whose
+// sonnet scouts burned most of the tokens), attribute per actual model:
+// one cycle overall, each participating model's bucket credited with its
+// own tokens/cost and one cycle of participation. Falls back to
+// single-model attribution when no breakdown exists.
+function addCycleUsage(totals, effectiveModel, result) {
+  const mu = result && result.modelUsage;
+  if (mu && typeof mu === 'object' && Object.keys(mu).length) {
+    totals.cycles += 1;
+    for (const [model, u] of Object.entries(mu)) {
+      const inTok = Number(u.in) || 0;
+      const outTok = Number(u.out) || 0;
+      const cost = Number(u.costUsd) || 0;
+      totals.in += inTok;
+      totals.out += outTok;
+      totals.costUsd += cost;
+      const m = totals.byModel[model] || (totals.byModel[model] = { in: 0, out: 0, costUsd: 0, cycles: 0 });
+      m.in += inTok;
+      m.out += outTok;
+      m.costUsd += cost;
+      m.cycles += 1;
+    }
+    return;
+  }
+  addCycleToTotals(totals, effectiveModel, result && result.tokens, result && result.costUsd);
+}
+
 function addCycleToTotals(totals, model, tokens, costUsd) {
   const t = tokens || {};
   const inTok = Number(t.in) || 0;
@@ -608,6 +636,7 @@ class Scheduler extends EventEmitter {
         model: effectiveModel,
         order: order ? order.id : null,
         verify: result.verify != null ? result.verify : null,
+        modelUsage: result.modelUsage || undefined,
         minutes: result.minutes,
         exit: result.exit,
         code: result.code,
@@ -636,7 +665,7 @@ class Scheduler extends EventEmitter {
 
     runtime.cycle = cycleNumber;
     runtime.sinceReview = (runtime.sinceReview || 0) + 1;
-    addCycleToTotals(runtime.totals, effectiveModel, result.tokens, result.costUsd);
+    addCycleUsage(runtime.totals, effectiveModel, result);
 
     if (result.exit === 'crash') {
       const now = Date.now();
@@ -860,7 +889,7 @@ class Scheduler extends EventEmitter {
     try {
       for (const e of events.readEvents(project.dir, 100000)) {
         if (e && e.ev === 'cycle_end') {
-          addCycleToTotals(totals, e.model || project.model, e.tokens, e.costUsd);
+          addCycleUsage(totals, e.model || project.model, e);
         }
       }
     } catch (err) {

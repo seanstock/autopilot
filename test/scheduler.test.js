@@ -425,6 +425,45 @@ test('token/cost totals accumulate per model, stamp cycle_end, and reach the sna
   assert.equal(snap.totals.in, runtime.totals.in, 'global totals sum project totals');
 });
 
+test('modelUsage breakdown attributes totals per actual model (subagent fan-out)', async () => {
+  const project = makeProject({ workerModel: 'claude-sonnet-5', model: 'claude-fable-5' });
+  const stateObj = makeStateObj([project]);
+
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult({
+      tokens: { in: 5000, out: 500 },
+      costUsd: 3.0,
+      modelUsage: {
+        'claude-fable-5': { in: 1000, out: 100, costUsd: 2.0 },
+        'claude-sonnet-5': { in: 4000, out: 400, costUsd: 1.0 },
+      },
+    });
+  };
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => runs >= 1);
+  await sched.stopDaemon();
+
+  const runtime = state.readRuntime(project.dir);
+  const firstCycle = { cycles: runtime.totals.cycles };
+  assert.ok(firstCycle.cycles >= 1);
+  // Per-cycle invariants (checked proportionally since >1 cycle may run):
+  assert.equal(runtime.totals.in, firstCycle.cycles * 5000, 'overall in = sum of per-model in');
+  assert.ok(Math.abs(runtime.totals.costUsd - firstCycle.cycles * 3.0) < 1e-9);
+  assert.equal(runtime.totals.byModel['claude-fable-5'].in, firstCycle.cycles * 1000);
+  assert.equal(runtime.totals.byModel['claude-sonnet-5'].in, firstCycle.cycles * 4000);
+  assert.equal(runtime.totals.byModel['claude-fable-5'].cycles, firstCycle.cycles, 'each participating model counts the cycle');
+  assert.equal(runtime.totals.byModel['claude-sonnet-5'].cycles, firstCycle.cycles);
+
+  const evs = events.readEvents(project.dir, 50);
+  const end = evs.find((e) => e.ev === 'cycle_end');
+  assert.ok(end.modelUsage, 'cycle_end stamps the modelUsage breakdown');
+  assert.equal(end.modelUsage['claude-sonnet-5'].out, 400);
+});
+
 test('totals backfill seeds once from existing events.jsonl', async () => {
   const project = makeProject();
   const stateObj = makeStateObj([project]);

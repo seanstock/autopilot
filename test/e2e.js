@@ -138,6 +138,57 @@ async function main() {
 
   check('SSE delivered status event', sseEvents.has('status'), Array.from(sseEvents).join(','));
 
+  // --- orchestrated project leg (v0.3): worker consumes the open order,
+  // verify gate stamps, empty queue flips to an orchestrate cycle ---
+  const proj2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-e2e-orch-'));
+  const orchProj = state.addProject(stateObj, {
+    dir: proj2,
+    prompt: 'Orchestrated e2e project.',
+    priority: 1,
+    model: 'claude-fable-5',
+    criticRatio: 0,
+    reviewGateCycles: 0,
+    containment: 'standard',
+  });
+  orchProj.workerModel = 'claude-sonnet-5';
+  orchProj.verifyCmd = `"${process.execPath}" -e "process.exit(0)"`;
+  orchProj.maxCycleMinutes = 1;
+  orchProj.claudeCmd = [process.execPath, fakeClaude];
+  fs.mkdirSync(path.join(proj2, 'orders'), { recursive: true });
+  const orderPath = path.join(proj2, 'orders', '001-first.md');
+  fs.writeFileSync(orderPath, '# First order\nstatus: open\ncreated: seed by cycle 0\nverify: -\n\n## Objective\nDo the thing.\n');
+  state.save(stateObj);
+
+  const evFile2 = path.join(proj2, '.autopilot', 'events.jsonl');
+  const readEvs2 = () => {
+    if (!fs.existsSync(evFile2)) return [];
+    return fs.readFileSync(evFile2, 'utf8').trim().split('\n').filter(Boolean)
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  };
+  let wend = null;
+  const deadline2 = Date.now() + 60000;
+  while (Date.now() < deadline2) {
+    wend = readEvs2().find((e) => e.ev === 'cycle_end' && e.kind === 'work');
+    if (wend) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check('worker cycle consumed the open order', !!wend && wend.order === '001-first', wend && JSON.stringify({ order: wend.order, model: wend.model }));
+  check('worker ran with workerModel', !!wend && wend.model === 'claude-sonnet-5', wend && wend.model);
+  check('verify gate ran and passed', !!wend && wend.verify && wend.verify.ok === true, wend && JSON.stringify(wend.verify));
+  check('worker prompt carried the order', fs.existsSync(path.join(proj2, 'received_prompt.txt')) && /ONE work order|First order/.test(fs.readFileSync(path.join(proj2, 'received_prompt.txt'), 'utf8')));
+
+  fs.writeFileSync(orderPath, '# First order\nstatus: done\ncreated: seed by cycle 0\nverify: -\n\n## Objective\nDo the thing.\n');
+  let orch = null;
+  const deadline3 = Date.now() + 60000;
+  while (Date.now() < deadline3) {
+    orch = readEvs2().find((e) => e.ev === 'cycle_start' && e.kind === 'orchestrate');
+    if (orch) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check('empty queue flips to orchestrate cycle', !!orch);
+  fs.writeFileSync(path.join(proj2, '.autopilot', 'STOP'), '');
+  await new Promise((r) => setTimeout(r, 500));
+
   sseReq.destroy();
   await sched.stopDaemon();
   srv.close();

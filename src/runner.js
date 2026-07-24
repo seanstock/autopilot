@@ -239,7 +239,13 @@ function runVerifyGate(project) {
   // /d /s /c plus windowsVerbatimArguments: cmd.exe's own quote-stripping
   // rules otherwise collide with Node's array-arg auto-escaping and mangle
   // any verifyCmd containing embedded double quotes (e.g. `node -e "..."`).
-  const args = process.platform === 'win32' ? ['/d', '/s', '/c', cmdStr] : ['-c', cmdStr];
+  // The extra outer quotes matter: with /s, cmd.exe strips exactly one
+  // outer quote pair from the whole command line - without them, a
+  // verifyCmd that BEGINS with a quoted path (`"C:\Program Files\..." -e
+  // ...`) loses its first and last quote chars and breaks. With them,
+  // every shape (bare `npm test`, embedded quotes, leading quoted path)
+  // survives verbatim.
+  const args = process.platform === 'win32' ? ['/d', '/s', '/c', `"${cmdStr}"`] : ['-c', cmdStr];
 
   try {
     const res = spawnSync(bin, args, {
@@ -332,7 +338,29 @@ function resultInfoFrom(parsedLine) {
     isError: parsedLine.is_error === true,
     tokens: { in: inputTokens, out: usage.output_tokens || 0 },
     costUsd: typeof parsedLine.total_cost_usd === 'number' ? parsedLine.total_cost_usd : null,
+    modelUsage: normalizeModelUsage(parsedLine.modelUsage),
   };
+}
+
+// stream-json's result line carries a per-model usage/cost breakdown that
+// INCLUDES subagent activity (verified empirically 2026-07-24: a Task
+// subagent's turns and cost appear in the parent's usage/modelUsage).
+// Normalize it to our shape so orchestrate cycles that fan out to scout
+// subagents attribute cost to the models that actually ran, not just the
+// configured one. Parsed defensively - absent/foreign shapes yield null
+// and the caller falls back to whole-cycle single-model attribution.
+function normalizeModelUsage(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  for (const [model, u] of Object.entries(raw)) {
+    if (!u || typeof u !== 'object') continue;
+    out[model] = {
+      in: (Number(u.inputTokens) || 0) + (Number(u.cacheReadInputTokens) || 0) + (Number(u.cacheCreationInputTokens) || 0),
+      out: Number(u.outputTokens) || 0,
+      costUsd: Number(u.costUSD) || 0,
+    };
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 /**
@@ -568,6 +596,7 @@ async function runCycle(opts) {
     minutes,
     tokens: resultInfo ? resultInfo.tokens : { in: 0, out: 0 },
     costUsd: resultInfo ? resultInfo.costUsd : null,
+    modelUsage: resultInfo ? resultInfo.modelUsage : null,
     commit,
     gitDiff,
     verify,
