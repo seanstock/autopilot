@@ -425,6 +425,31 @@ test('token/cost totals accumulate per model, stamp cycle_end, and reach the sna
   assert.equal(snap.totals.in, runtime.totals.in, 'global totals sum project totals');
 });
 
+test('stuck order: same order re-dispatched at most 3 times, then a grooming orchestrate cycle (I1)', async () => {
+  const project = makeProject({ workerModel: 'claude-sonnet-5', criticRatio: 0 });
+  const stateObj = makeStateObj([project]);
+
+  const ordersDir = path.join(project.dir, 'orders');
+  fs.mkdirSync(ordersDir, { recursive: true });
+  // A worker that never advances the status - the livelock scenario.
+  fs.writeFileSync(path.join(ordersDir, '001-stuck.md'), '# Stuck\nstatus: open\n\n## Objective\nx\n');
+
+  const kinds = [];
+  const runCycleImpl = async ({ kind }) => {
+    kinds.push(kind);
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => kinds.length >= 5);
+  await sched.stopDaemon();
+
+  assert.deepEqual(kinds.slice(0, 4), ['work', 'work', 'work', 'orchestrate'],
+    'three attempts at the stuck order, then a forced grooming orchestrate');
+  assert.equal(kinds[4], 'work', 'after grooming, the still-open order gets fresh attempts');
+});
+
 test('modelUsage breakdown attributes totals per actual model (subagent fan-out)', async () => {
   const project = makeProject({ workerModel: 'claude-sonnet-5', model: 'claude-fable-5' });
   const stateObj = makeStateObj([project]);

@@ -50,6 +50,11 @@ const SHUTDOWN_GRACE_MS = 30 * 1000;
 // still stamped as events every time; only the toast is debounced.
 const NOTIFY_DEBOUNCE_MS = 30 * 60 * 1000;
 
+// Consecutive worker dispatches of the same order before a grooming
+// orchestrate cycle is forced (I1, v0.3 review: breaks the stuck-order
+// livelock where a worker exits clean without advancing the status).
+const STUCK_ORDER_LIMIT = 3;
+
 function pidFilePath() {
   return path.join(util.AUTOPILOT_HOME, DAEMON_PID_FILENAME);
 }
@@ -218,6 +223,7 @@ class Scheduler extends EventEmitter {
     this.probeIntervalMs = o.probeIntervalMs != null ? o.probeIntervalMs : PROBE_INTERVAL_MS;
 
     this.paused = false;
+    this._orderAttempts = {}; // projectId -> {orderId, count} | null (I1)
 
     this._startedIso = null;
     this._started = false;
@@ -573,11 +579,29 @@ class Scheduler extends EventEmitter {
     } else if (orchestrationEnabled) {
       const openOrder = findLowestOpenOrder(project.dir);
       if (openOrder) {
-        kind = 'work';
-        order = openOrder;
-        effectiveModel = project.workerModel;
+        // I1 fix (v0.3 review): a worker that exits without advancing its
+        // order's status would otherwise be re-dispatched against the same
+        // order forever, and the orchestrate cycle that could groom the
+        // stuck order only ran at zero open orders. Cap consecutive
+        // dispatches of the SAME order at STUCK_ORDER_LIMIT, then force a
+        // grooming orchestrate cycle (which resets the counter). The
+        // counter is in-memory: a daemon restart re-grants the order fresh
+        // attempts, which is acceptable - the cap exists to break
+        // livelocks, not to be an exact count.
+        const prev = this._orderAttempts[project.id];
+        const attempts = prev && prev.orderId === openOrder.id ? prev.count : 0;
+        if (attempts >= STUCK_ORDER_LIMIT) {
+          kind = 'orchestrate';
+          this._orderAttempts[project.id] = null;
+        } else {
+          kind = 'work';
+          order = openOrder;
+          effectiveModel = project.workerModel;
+          this._orderAttempts[project.id] = { orderId: openOrder.id, count: attempts + 1 };
+        }
       } else {
         kind = 'orchestrate';
+        this._orderAttempts[project.id] = null;
       }
     } else {
       kind = 'work';

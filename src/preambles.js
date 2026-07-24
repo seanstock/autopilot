@@ -325,7 +325,10 @@ two different sources of truth.
 
 You may dispatch the \`scout\` subagent (Task tool, read-only: Read, Glob,
 Grep, WebSearch, WebFetch - it cannot edit anything) for research,
-auditing, or fact-checking work that helps you plan orders. Scale effort
+auditing, or fact-checking work that helps you plan orders. Use ONLY the
+scout agent type: never launch general-purpose or any other subagent
+type, and never delegate work that mutates files to a subagent - mutation
+belongs exclusively to one-order worker cycles, serially. Scale effort
 to the task, the same rule in every serious multi-agent system that has
 been measured: use 1 scout for a simple lookup, 2-4 scouts for a genuine
 comparison across a few options or areas, and reach for more only when the

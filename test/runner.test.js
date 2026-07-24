@@ -182,6 +182,58 @@ test('work cycle consumes INJECT.md: directive reaches the child, file archived 
   assert.match(inject.preview, /star field/);
 });
 
+test('orchestrate cycle consumes INJECT.md (C1: directives reach the planner)', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir, { workerModel: 'claude-sonnet-5' });
+  const budget = mockBudget();
+
+  const meta = path.join(dir, '.autopilot');
+  fs.mkdirSync(meta, { recursive: true });
+  fs.writeFileSync(path.join(meta, 'INJECT.md'), 'Please add a star field to the project.\n');
+
+  await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'orchestrate', cycleNumber: 2, budget, claudeCmd: fakeCmd(), order: null })
+  );
+
+  const received = fs.readFileSync(path.join(dir, 'received_prompt.txt'), 'utf8');
+  assert.match(received, /USER DIRECTIVE/);
+  assert.match(received, /star field/);
+  assert.equal(fs.existsSync(path.join(meta, 'INJECT.md')), false, 'orchestrate cycle must consume and clear the injection');
+});
+
+test('worker cycle with an order does NOT consume INJECT.md', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir, { workerModel: 'claude-sonnet-5' });
+  const budget = mockBudget();
+
+  const meta = path.join(dir, '.autopilot');
+  fs.mkdirSync(meta, { recursive: true });
+  fs.writeFileSync(path.join(meta, 'INJECT.md'), 'Please add a star field to the project.\n');
+
+  await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'work', cycleNumber: 2, budget, claudeCmd: fakeCmd(), order: { id: '001-x', content: '# X\nstatus: open\n' } })
+  );
+
+  const received = fs.readFileSync(path.join(dir, 'received_prompt.txt'), 'utf8');
+  assert.doesNotMatch(received, /star field/);
+  assert.equal(fs.existsSync(path.join(meta, 'INJECT.md')), true);
+});
+
+test('critic in a plain (non-orchestrated) project gets base settings, no Task (I2)', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir); // no workerModel
+  const budget = mockBudget();
+
+  await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'critic', cycleNumber: 1, budget, claudeCmd: fakeCmd(), order: null })
+  );
+
+  const envSeen = JSON.parse(fs.readFileSync(path.join(dir, 'env_seen.json'), 'utf8'));
+  const argv = (envSeen.argv || []).join(' ');
+  assert.match(argv, /cycle_settings\.json/);
+  assert.doesNotMatch(argv, /cycle_settings_orchestrate\.json/);
+});
+
 test('critic cycle leaves INJECT.md untouched', async () => {
   const dir = tempProjectRepo();
   const project = baseProject(dir);

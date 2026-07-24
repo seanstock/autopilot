@@ -276,12 +276,15 @@ function runVerifyGate(project) {
 // consumption the text is archived to .autopilot/injections.log and the
 // file is cleared, so a directive is delivered exactly once.
 function consumeInjection(project, kind, cycleNumber, order) {
-  // A worker cycle carrying an order must not consume INJECT.md - the
-  // scheduler routes pending injections to an orchestrate cycle instead
-  // (docs/plans/2026-07-24-goal-loop.md); this is the backstop in case a
-  // work cycle is ever dispatched with an order while an injection is
-  // still pending.
-  if (kind !== 'work' || order) return null;
+  // C1 fix (v0.3 review): injections are consumed by orchestrate cycles
+  // (orchestrated projects - the planner triages directives) and by plain
+  // work cycles (non-orchestrated projects). A worker cycle carrying an
+  // order never consumes - backstop for the scheduler's routing. The
+  // original guard (`kind !== 'work' || order`) made orchestrated
+  // injections undeliverable: the scheduler routed them to orchestrate
+  // cycles which then refused them, looping big-model cycles forever.
+  const consumes = kind === 'orchestrate' || (kind === 'work' && !order);
+  if (!consumes) return null;
   const injectPath = path.join(util.projectMeta(project.dir), 'INJECT.md');
   let text = null;
   try {
@@ -396,8 +399,15 @@ async function runCycle(opts) {
   // orchestrate variant (Task tool allowed), falling back to the base
   // settings if containment generation didn't produce one; work/wrapup
   // always use the base variant.
+  // I2 fix (v0.3 review): the Task-allowing variant is reserved for
+  // orchestrated projects (workerModel set). A critic in a plain v0.2
+  // project keeps the v0.2 settings - it gains no subagents just because
+  // the variant file exists on disk.
+  const orchestrated = !!project.workerModel;
   const effectiveSettingsPath =
-    kind === 'orchestrate' || kind === 'critic' ? orchestrateSettingsPath || settingsPath : settingsPath;
+    (kind === 'orchestrate' || (kind === 'critic' && orchestrated))
+      ? orchestrateSettingsPath || settingsPath
+      : settingsPath;
   const preHead = gitRevParseHead(dir);
   let preamble = buildPreamble(project, kind, order);
   const injection = consumeInjection(project, kind, cycleNumber, order);

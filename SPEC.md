@@ -143,7 +143,14 @@ stream-json `modelUsage`). Workers get no subagents.
 command the RUNNER executes after every cycle (before auto-commit, 10 min
 timeout): the result lands in cycle_end as `verify: {cmd, ok, code}`.
 Ground truth about "does it still pass" comes from the runner's own
-execution, never from the model's claims.
+execution, never from the model's claims. Trust note: verifyCmd is
+daemon-executed shell from projects.json - the same trust class as
+`prompt` (which already yields shell via cycles), not a new escalation
+class; both are the project owner's own configuration. Likewise the Task
+allow in orchestrate/critic settings is tool-level: restricting the
+orchestrator to the read-only scout is preamble contract (tripwire
+grade), while the hard walls remain the settings/guards every subagent
+inherits.
 
 **Critic cycle.** If `criticRatio` = N > 0, every Nth cycle gets the critic
 preamble instead: do no new work; independently re-derive and try to REFUTE
