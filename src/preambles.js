@@ -107,10 +107,21 @@ ${prompt}
 
 function criticPreamble(project) {
   const prompt = (project && project.prompt) || '';
+  // M6 (v0.3 review): an orchestrated project's critic runs with the Task
+  // tool available - it gets the same scout-only constraint the
+  // orchestrator preamble carries, or the read-only-fan-out invariant
+  // would silently not apply to every Task-capable cycle kind.
+  const scoutClause = project && project.workerModel
+    ? `\n\nThis project is orchestrated, so the Task tool is available to you.
+Use ONLY the read-only \`scout\` subagent type (for parallel re-derivation
+and fact-checking) - never general-purpose or any other type, and never
+delegate anything that mutates files to a subagent. Refutation reads;
+it does not write.`
+    : '';
   return `You are running one autonomous CRITIC cycle under Autopilot (cycle contract
 v${PREAMBLE_VERSION}). This is not a work cycle. Do not add features, do not
 fix things you merely suspect are broken, do not write new artifacts toward
-the mission below. Your only job this cycle is to try to REFUTE recent work.
+the mission below. Your only job this cycle is to try to REFUTE recent work.${scoutClause}
 
 This preamble is fixed and not part of the mission - it is the operating
 contract this cycle runs under. Follow it exactly, in order.
@@ -398,6 +409,16 @@ Rules for this order:
    short note on why, rather than improvising scope to force it closed.
 5. END the cycle after this order. Do not start a second order even if you
    finish early - the orchestrator dispatches the next one.
+
+The status line is not paperwork - it is how the scheduler routes the next
+cycle. NEVER end this cycle with the order still saying "status: open":
+your very first file edit is line 2 of the order file to
+"status: in_progress", and your very last edit before ending is that same
+line to "status: done" (only after verifying) or "status: blocked" (with a
+note). Leaving it "open" makes the daemon re-dispatch the same order and,
+after three wasted attempts, burn an expensive planner cycle to clean up
+after you. (A live smoke run caught a worker doing exactly this - do not
+repeat it.)
 `;
 }
 
