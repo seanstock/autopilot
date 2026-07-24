@@ -1,0 +1,9 @@
+# machine-local Claude Code settings
+.claude/
+
+# build-session orchestration artifacts (kept locally, not product)
+.superpowers/
+
+# runtime state lives in ~/.autopilot, never here; belt and braces
+*.log
+node_modules/

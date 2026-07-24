@@ -1,0 +1,828 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { spawn } = require('child_process');
+
+const { Scheduler } = require('../src/scheduler');
+const util = require('../src/util');
+const state = require('../src/state');
+const events = require('../src/events');
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+function tempHome() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-sched-home-'));
+  process.env.AUTOPILOT_HOME_OVERRIDE = dir;
+  return dir;
+}
+
+function tempProjectDir(prefix) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `autopilot-sched-${prefix}-`));
+}
+
+let counter = 0;
+function makeProject(overrides) {
+  counter += 1;
+  const dir = tempProjectDir(`p${counter}`);
+  return Object.assign(
+    {
+      id: `proj-${counter}`,
+      dir,
+      prompt: 'do work',
+      priority: 1,
+      enabled: true,
+      model: 'claude-sonnet-5',
+      maxCycleMinutes: 120,
+      criticRatio: 0,
+      reviewGateCycles: 0,
+      containment: 'off',
+    },
+    overrides || {}
+  );
+}
+
+function makeStateObj(projects, settingsOverrides) {
+  return {
+    settings: Object.assign({ ceilingPct: 75, graceMinutes: 0, webhook: null, port: 4680 }, settingsOverrides || {}),
+    projects,
+  };
+}
+
+// Wraps a partial budget implementation with call counters, so tests don't
+// need to re-implement counting in every override.
+function makeBudget(overrides) {
+  const calls = { check: 0, noteUsageLimitExit: 0, probeGate: 0, clearFatal: 0 };
+  const impl = Object.assign(
+    {
+      async check() {
+        return { ok: true, reason: null, windows: [], resetsAt: null, checkedIso: util.nowIso() };
+      },
+      noteUsageLimitExit() {},
+      async probeGate() {
+        return { ok: false };
+      },
+      isFatal() {
+        return false;
+      },
+      clearFatal() {},
+    },
+    overrides || {}
+  );
+  return {
+    calls,
+    async check(...args) {
+      calls.check += 1;
+      return impl.check(...args);
+    },
+    noteUsageLimitExit(...args) {
+      calls.noteUsageLimitExit += 1;
+      return impl.noteUsageLimitExit(...args);
+    },
+    async probeGate(...args) {
+      calls.probeGate += 1;
+      return impl.probeGate(...args);
+    },
+    isFatal(...args) {
+      return impl.isFatal(...args);
+    },
+    clearFatal(...args) {
+      calls.clearFatal += 1;
+      return impl.clearFatal(...args);
+    },
+  };
+}
+
+function cleanResult(overrides) {
+  return Object.assign(
+    {
+      exit: 'clean',
+      code: 0,
+      minutes: 0.01,
+      tokens: { in: 10, out: 5 },
+      costUsd: 0.001,
+      commit: 'abc1234',
+      gitDiff: { files: 1, ins: 1, del: 0 },
+    },
+    overrides || {}
+  );
+}
+
+async function waitUntil(fn, timeoutMs = 1500, intervalMs = 15) {
+  const start = Date.now();
+  for (;;) {
+    if (await fn()) return true;
+    if (Date.now() - start >= timeoutMs) return false;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
+test.beforeEach(() => {
+  tempHome();
+});
+
+test.afterEach(async () => {
+  delete process.env.AUTOPILOT_HOME_OVERRIDE;
+});
+
+// ---------------------------------------------------------------------------
+// one-cycle-at-a-time invariant
+// ---------------------------------------------------------------------------
+
+test('never runs two cycles at once (single async loop invariant)', async () => {
+  const p1 = makeProject({ priority: 1 });
+  const p2 = makeProject({ priority: 1 });
+  const stateObj = makeStateObj([p1, p2]);
+  const budget = makeBudget();
+
+  let active = 0;
+  let maxActive = 0;
+  let totalRuns = 0;
+  const runCycleImpl = async () => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((r) => setTimeout(r, 60));
+    active -= 1;
+    totalRuns += 1;
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 20 });
+  sched.start();
+  await waitUntil(() => totalRuns >= 4);
+  await sched.stopDaemon();
+
+  assert.equal(maxActive, 1, 'expected at most one concurrent cycle');
+});
+
+// ---------------------------------------------------------------------------
+// priority + round robin
+// ---------------------------------------------------------------------------
+
+test('picks lowest priority number first, round-robins among equal priorities', async () => {
+  const lowA = makeProject({ id: 'low-a', priority: 1 });
+  const lowB = makeProject({ id: 'low-b', priority: 1 });
+  const high = makeProject({ id: 'high', priority: 5 });
+  const stateObj = makeStateObj([lowA, lowB, high]);
+  const budget = makeBudget();
+
+  const seen = [];
+  const runCycleImpl = async ({ project }) => {
+    seen.push(project.id);
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => seen.length >= 6);
+  await sched.stopDaemon();
+
+  assert.ok(!seen.includes('high'), 'higher-priority-number project must not run while priority-1 projects are runnable');
+
+  const firstSix = seen.slice(0, 6);
+  const countA = firstSix.filter((id) => id === 'low-a').length;
+  const countB = firstSix.filter((id) => id === 'low-b').length;
+  assert.ok(Math.abs(countA - countB) <= 1, `expected roughly alternating picks, got ${JSON.stringify(firstSix)}`);
+});
+
+// ---------------------------------------------------------------------------
+// critic modulo
+// ---------------------------------------------------------------------------
+
+test('critic kind fires every Nth cycle per criticRatio', async () => {
+  const project = makeProject({ criticRatio: 3 });
+  const stateObj = makeStateObj([project]);
+  const budget = makeBudget();
+
+  const kinds = {};
+  const runCycleImpl = async ({ kind, cycleNumber }) => {
+    kinds[cycleNumber] = kind;
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => kinds[6] !== undefined);
+  await sched.stopDaemon();
+
+  assert.equal(kinds[1], 'work');
+  assert.equal(kinds[2], 'work');
+  assert.equal(kinds[3], 'critic');
+  assert.equal(kinds[4], 'work');
+  assert.equal(kinds[5], 'work');
+  assert.equal(kinds[6], 'critic');
+});
+
+// ---------------------------------------------------------------------------
+// review gate
+// ---------------------------------------------------------------------------
+
+test('review gate pauses at reviewGateCycles and Reviewed resumes it', async () => {
+  const project = makeProject({ reviewGateCycles: 2 });
+  const stateObj = makeStateObj([project]);
+  const budget = makeBudget();
+
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => runs >= 2);
+  await new Promise((r) => setTimeout(r, 150)); // several more ticks - must NOT run a 3rd
+  assert.equal(runs, 2, 'must stop at the review gate, not run a 3rd cycle');
+
+  const snap = sched.snapshot();
+  const projSnap = snap.projects.find((p) => p.id === project.id);
+  assert.equal(projSnap.status, 'awaiting-review');
+
+  sched.markReviewed(project.id);
+  await waitUntil(() => runs >= 3);
+  await sched.stopDaemon();
+  assert.ok(runs >= 3);
+});
+
+test('a hand-touched REVIEWED file also resumes an awaiting-review project', async () => {
+  const project = makeProject({ reviewGateCycles: 1 });
+  const stateObj = makeStateObj([project]);
+  const budget = makeBudget();
+
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => runs >= 1);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(runs, 1);
+
+  util.ensureDir(util.projectMeta(project.dir));
+  fs.writeFileSync(path.join(util.projectMeta(project.dir), 'REVIEWED'), '');
+
+  await waitUntil(() => runs >= 2);
+  await sched.stopDaemon();
+  assert.ok(runs >= 2);
+  assert.equal(fs.existsSync(path.join(util.projectMeta(project.dir), 'REVIEWED')), false, 'REVIEWED must be consumed');
+});
+
+// ---------------------------------------------------------------------------
+// crash-loop cooldown
+// ---------------------------------------------------------------------------
+
+test('3 fast crashes cool down that project but the other project keeps running', async () => {
+  const crasher = makeProject({ id: 'crasher', priority: 1 });
+  const steady = makeProject({ id: 'steady', priority: 1 });
+  const stateObj = makeStateObj([crasher, steady]);
+  const budget = makeBudget();
+
+  let crasherRuns = 0;
+  let steadyRuns = 0;
+  const runCycleImpl = async ({ project }) => {
+    if (project.id === 'crasher') {
+      crasherRuns += 1;
+      return cleanResult({ exit: 'crash' });
+    }
+    steadyRuns += 1;
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => crasherRuns >= 3);
+  const crasherRunsAtCooldown = crasherRuns;
+
+  await waitUntil(() => steadyRuns >= 4, 1500);
+  await sched.stopDaemon();
+
+  assert.equal(crasherRuns, crasherRunsAtCooldown, 'crasher must stop running once cooldown trips');
+
+  const runtime = state.readRuntime(crasher.dir);
+  assert.ok(runtime.cooldownUntil, 'expected cooldownUntil to be set');
+
+  const snap = sched.snapshot();
+  const crasherSnap = snap.projects.find((p) => p.id === 'crasher');
+  assert.equal(crasherSnap.status, 'cooldown');
+});
+
+// ---------------------------------------------------------------------------
+// budget: ceiling / outage
+// ---------------------------------------------------------------------------
+
+test('over ceiling: no cycles run, a sleep event is stamped', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project]);
+  const budget = makeBudget({
+    async check() {
+      return {
+        ok: false,
+        reason: 'ceiling',
+        windows: [],
+        resetsAt: new Date(Date.now() + 3600000).toISOString(),
+        checkedIso: util.nowIso(),
+      };
+    },
+  });
+
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await new Promise((r) => setTimeout(r, 200));
+  await sched.stopDaemon();
+
+  assert.equal(runs, 0);
+  const evs = events.readEvents(project.dir, 50);
+  assert.ok(evs.some((e) => e.ev === 'sleep' && e.reason === 'ceiling'));
+
+  const snap = sched.snapshot();
+  assert.equal(snap.projects[0].status, 'sleeping');
+});
+
+test('usage_limit exit flips to sleep immediately, on the very next tick', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project]);
+
+  let limited = false;
+  const budget = makeBudget({
+    async check() {
+      if (limited) {
+        return { ok: false, reason: 'ceiling', windows: [], resetsAt: null, checkedIso: util.nowIso() };
+      }
+      return { ok: true, reason: null, windows: [], resetsAt: null, checkedIso: util.nowIso() };
+    },
+    noteUsageLimitExit() {
+      limited = true;
+    },
+  });
+
+  let runs = 0;
+  const kinds = [];
+  const runCycleImpl = async ({ kind }) => {
+    runs += 1;
+    kinds.push(kind);
+    // wrapup also dies of usage_limit here - must not chain another wrapup
+    return cleanResult({ exit: 'usage_limit' });
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => runs >= 1);
+  await new Promise((r) => setTimeout(r, 150));
+  await sched.stopDaemon();
+
+  // Exactly one work cycle + its one cap-summary wrapup; never a third.
+  assert.deepEqual(kinds, ['work', 'wrapup'], 'usage_limit triggers exactly one wrapup and no further cycles');
+  assert.ok(budget.calls.noteUsageLimitExit >= 1);
+
+  const evs = events.readEvents(project.dir, 50);
+  const wrapEnd = evs.find((e) => e.ev === 'cycle_end' && e.kind === 'wrapup');
+  assert.ok(wrapEnd, 'wrapup cycle stamped its own cycle_start/cycle_end events');
+});
+
+test('pending injection forces the next cycle to be work even on critic cadence', async () => {
+  const project = makeProject({ criticRatio: 1 }); // every cycle would be critic
+  const stateObj = makeStateObj([project]);
+
+  const meta = path.join(project.dir, '.autopilot');
+  fs.mkdirSync(meta, { recursive: true });
+  fs.writeFileSync(path.join(meta, 'INJECT.md'), 'Please add a star field.\n');
+
+  const kinds = [];
+  const runCycleImpl = async ({ kind }) => {
+    kinds.push(kind);
+    if (kinds.length === 1) {
+      // the real runner consumes the file on the first work cycle
+      try { fs.unlinkSync(path.join(meta, 'INJECT.md')); } catch (e) {}
+    }
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => kinds.length >= 2);
+  await sched.stopDaemon();
+
+  assert.equal(kinds[0], 'work', 'injection pending -> forced work cycle');
+  assert.equal(kinds[1], 'critic', 'critic cadence resumes once the injection is consumed');
+});
+
+test('recovery toast is debounced even when transitions flap', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project]);
+  stateObj.settings.graceMinutes = 999; // grace blocks cycles; we only watch notify
+
+  // Budget alternates not-ok/ok every check - the pathological flap.
+  let flip = false;
+  const budget = makeBudget({
+    async check() {
+      flip = !flip;
+      return flip
+        ? { ok: false, reason: 'ceiling', windows: [], resetsAt: null, checkedIso: util.nowIso() }
+        : { ok: true, reason: null, windows: [], resetsAt: null, checkedIso: util.nowIso() };
+    },
+  });
+
+  let notifies = 0;
+  const sched = new Scheduler({
+    stateObj,
+    budget,
+    runCycleImpl: async () => cleanResult(),
+    notifyImpl: () => {
+      notifies += 1;
+    },
+    tickMs: 10,
+  });
+  sched.start();
+  await new Promise((r) => setTimeout(r, 400)); // ~40 ticks, ~20 not-ok->ok transitions
+  await sched.stopDaemon();
+
+  assert.equal(notifies, 1, 'flapping transitions must produce at most one toast per debounce window');
+});
+
+test('capSummary=false disables the usage-cap wrapup cycle', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project]);
+  stateObj.settings.capSummary = false;
+
+  let limited = false;
+  const budget = makeBudget({
+    async check() {
+      if (limited) {
+        return { ok: false, reason: 'ceiling', windows: [], resetsAt: null, checkedIso: util.nowIso() };
+      }
+      return { ok: true, reason: null, windows: [], resetsAt: null, checkedIso: util.nowIso() };
+    },
+    noteUsageLimitExit() {
+      limited = true;
+    },
+  });
+
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult({ exit: 'usage_limit' });
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => runs >= 1);
+  await new Promise((r) => setTimeout(r, 150));
+  await sched.stopDaemon();
+
+  assert.equal(runs, 1, 'no wrapup when capSummary is false');
+});
+
+// ---------------------------------------------------------------------------
+// fatal latch precedence
+// ---------------------------------------------------------------------------
+
+test('fatal latch: everything idles regardless of budget or per-project state', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project]);
+  const budget = makeBudget();
+
+  state.writeFatal('test_fatal_reason');
+
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await new Promise((r) => setTimeout(r, 200));
+  await sched.stopDaemon();
+
+  assert.equal(runs, 0);
+  const snap = sched.snapshot();
+  assert.ok(snap.fatal);
+  assert.equal(snap.fatal.reason, 'test_fatal_reason');
+  for (const p of snap.projects) assert.equal(p.status, 'fatal');
+});
+
+test('clearFatal releases the latch and cycles resume', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project]);
+  const budget = makeBudget();
+  state.writeFatal('test_fatal_reason');
+
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(runs, 0);
+
+  sched.clearFatal();
+  await waitUntil(() => runs >= 1);
+  await sched.stopDaemon();
+  assert.ok(runs >= 1);
+});
+
+// ---------------------------------------------------------------------------
+// grace period after recovery
+// ---------------------------------------------------------------------------
+
+test('grace period: notify fires on recovery and the first cycle waits graceMinutes', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project], { graceMinutes: 0.01 }); // ~0.6s
+
+  let ok = false;
+  const budget = makeBudget({
+    async check() {
+      if (!ok) return { ok: false, reason: 'outage', windows: [], resetsAt: null, checkedIso: util.nowIso() };
+      return { ok: true, reason: null, windows: [], resetsAt: null, checkedIso: util.nowIso() };
+    },
+  });
+
+  let notifyCalls = 0;
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({
+    stateObj,
+    budget,
+    runCycleImpl,
+    notifyImpl: () => {
+      notifyCalls += 1;
+    },
+    tickMs: 15,
+  });
+  sched.start();
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(runs, 0, 'still in outage, must not run yet');
+
+  const recoveredAt = Date.now();
+  ok = true;
+  await waitUntil(() => notifyCalls >= 1, 500);
+  assert.equal(runs, 0, 'must not run immediately on the recovery tick, grace must gate it');
+
+  await waitUntil(() => runs >= 1, 1500);
+  const elapsed = Date.now() - recoveredAt;
+  await sched.stopDaemon();
+
+  assert.ok(elapsed >= 550, `expected the ~600ms grace wait to be honored, only waited ${elapsed}ms`);
+});
+
+test('I1: sticky probe rescue stays runnable across multiple probe intervals; notify/grace fire exactly once', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project], { graceMinutes: 0 });
+
+  let probeCount = 0;
+  const budget = makeBudget({
+    async check() {
+      return { ok: false, reason: 'outage', windows: [], resetsAt: null, checkedIso: util.nowIso() };
+    },
+    async probeGate() {
+      probeCount += 1;
+      // First probe attempt fails (establishes the not-ok state via the
+      // normal sleep path); every probe after that succeeds.
+      return { ok: probeCount > 1 };
+    },
+  });
+
+  let notifyCalls = 0;
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({
+    stateObj,
+    budget,
+    runCycleImpl,
+    notifyImpl: () => {
+      notifyCalls += 1;
+    },
+    tickMs: 15,
+    probeIntervalMs: 150,
+  });
+  sched.start();
+
+  // Before the I1 fix, effectiveOk was only true on the single tick a probe
+  // happened to run on - every tick in between (the vast majority) saw the
+  // still-down real meter and reasserted not-ok, so the loop never ran a
+  // cycle and notify/grace_start refired on every probe interval. Wait long
+  // enough to cross at least two probe-interval boundaries.
+  await waitUntil(() => runs >= 1, 3000);
+  await new Promise((r) => setTimeout(r, 400)); // cross another probe interval boundary
+  await sched.stopDaemon();
+
+  assert.ok(runs >= 1, 'a cycle must actually run once the probe-rescued sticky window is in effect');
+  assert.equal(notifyCalls, 1, 'notify must fire exactly once across the whole rescued streak, not per probe interval');
+
+  const evs = events.readEvents(project.dir, 200);
+  const graceStarts = evs.filter((e) => e.ev === 'grace_start');
+  assert.equal(graceStarts.length, 1, 'grace_start must be stamped exactly once, not once per probe interval');
+});
+
+test('I2: stopDaemon waits (bounded) for an in-flight cycle via the STOP mechanism, then removes STOP', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project]);
+  const budget = makeBudget();
+
+  const stopPath = path.join(util.projectMeta(project.dir), 'STOP');
+  let started = false;
+  let sawStopDuring = false;
+  const runCycleImpl = async () => {
+    started = true;
+    // Mimic the real runner's own contract: poll for STOP and, once it
+    // appears, classify 'stopped' (runner.js already tree-kills + classifies
+    // this way; the scheduler's shutdown path is supposed to trigger it via
+    // the STOP file rather than duplicating the kill logic).
+    const deadline = Date.now() + 5000;
+    while (!fs.existsSync(stopPath) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    sawStopDuring = fs.existsSync(stopPath);
+    return cleanResult({ exit: 'stopped' });
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => started);
+
+  const stoppedAt = Date.now();
+  await sched.stopDaemon();
+  const elapsed = Date.now() - stoppedAt;
+
+  assert.ok(sawStopDuring, 'the in-flight cycle must observe the STOP file stopDaemon() creates');
+  assert.equal(fs.existsSync(stopPath), false, 'stopDaemon() must remove the STOP file it created once the cycle finishes');
+  assert.ok(elapsed < 5000, `stopDaemon must not hang past the bounded shutdown window, took ${elapsed}ms`);
+
+  const evs = events.readEvents(project.dir, 50);
+  assert.ok(
+    evs.some((e) => e.ev === 'cycle_end' && e.exit === 'stopped'),
+    'cycle_end must still be stamped for the gracefully-stopped cycle'
+  );
+});
+
+test('pauseAll idles the loop; resumeAll continues without the budget-recovery grace wait', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project], { graceMinutes: 30 }); // large - must never apply here
+  const budget = makeBudget();
+
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+
+  sched.pauseAll();
+  sched.start();
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(runs, 0);
+
+  const beforeResume = Date.now();
+  sched.resumeAll();
+  await waitUntil(() => runs >= 1, 500);
+  const elapsed = Date.now() - beforeResume;
+  await sched.stopDaemon();
+
+  assert.ok(elapsed < 400, `manual resume should not incur the budget-recovery grace wait, took ${elapsed}ms`);
+});
+
+// ---------------------------------------------------------------------------
+// STOP / start project
+// ---------------------------------------------------------------------------
+
+test('stopProject creates STOP (status stopped, no cycles); startProject clears it', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project]);
+  const budget = makeBudget();
+
+  let runs = 0;
+  const runCycleImpl = async () => {
+    runs += 1;
+    return cleanResult();
+  };
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+
+  sched.stopProject(project.id);
+  sched.start();
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(runs, 0);
+
+  let snap = sched.snapshot();
+  assert.equal(snap.projects[0].status, 'stopped');
+
+  sched.startProject(project.id);
+  await waitUntil(() => runs >= 1);
+  await sched.stopDaemon();
+  assert.ok(runs >= 1);
+});
+
+// ---------------------------------------------------------------------------
+// I6: setPriority rejects non-numeric values (server-side half)
+// ---------------------------------------------------------------------------
+
+test('I6: setPriority rejects a non-numeric priority and leaves the stored value untouched', async () => {
+  const project = makeProject({ priority: 2 });
+  const stateObj = makeStateObj([project]);
+  const budget = makeBudget();
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl: async () => cleanResult(), notifyImpl: () => {}, tickMs: 1000 });
+
+  const ok = sched.setPriority(project.id, '<script>alert(1)</script>');
+  assert.equal(ok, false);
+  assert.equal(project.priority, 2, 'priority must be unchanged after a rejected update');
+
+  const okNumeric = sched.setPriority(project.id, '5');
+  assert.equal(okNumeric, true);
+  assert.equal(project.priority, 5, 'a numeric string must still be accepted and coerced');
+});
+
+// ---------------------------------------------------------------------------
+// daemon pid lock
+// ---------------------------------------------------------------------------
+
+test('start() overwrites a stale pid file (recorded pid is not alive)', async () => {
+  const stateObj = makeStateObj([]);
+  const budget = makeBudget();
+  util.writeJson(path.join(util.AUTOPILOT_HOME, 'daemon.pid'), { pid: 999999999, startedIso: util.nowIso() });
+
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl: async () => cleanResult(), notifyImpl: () => {}, tickMs: 1000 });
+  assert.doesNotThrow(() => sched.start());
+  await sched.stopDaemon();
+});
+
+test('start() refuses when the recorded pid belongs to a live, different process', async () => {
+  const stateObj = makeStateObj([]);
+  const budget = makeBudget();
+
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 5000)'], { windowsHide: true });
+  try {
+    await new Promise((resolve) => {
+      if (child.pid) resolve();
+      else child.once('spawn', resolve);
+    });
+    util.writeJson(path.join(util.AUTOPILOT_HOME, 'daemon.pid'), { pid: child.pid, startedIso: util.nowIso() });
+
+    const sched = new Scheduler({
+      stateObj,
+      budget,
+      runCycleImpl: async () => cleanResult(),
+      notifyImpl: () => {},
+      tickMs: 1000,
+    });
+    assert.throws(() => sched.start(), /already running/);
+  } finally {
+    child.kill();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// snapshot shape
+// ---------------------------------------------------------------------------
+
+test('snapshot matches the shared status contract shape', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project]);
+  const budget = makeBudget();
+  const sched = new Scheduler({
+    stateObj,
+    budget,
+    runCycleImpl: async () => cleanResult(),
+    notifyImpl: () => {},
+    tickMs: 1000,
+  });
+
+  const snap = sched.snapshot();
+  assert.deepEqual(Object.keys(snap).sort(), ['budget', 'current', 'daemon', 'fatal', 'projects', 'settings'].sort());
+  assert.deepEqual(Object.keys(snap.daemon).sort(), ['pid', 'startedIso', 'version', 'paused'].sort());
+  assert.deepEqual(Object.keys(snap.budget).sort(), ['ok', 'reason', 'checkedIso', 'windows'].sort());
+  assert.deepEqual(Object.keys(snap.settings).sort(), ['ceilingPct', 'graceMinutes', 'webhook'].sort());
+
+  const p = snap.projects[0];
+  for (const key of ['status', 'statusDetail', 'cycle', 'sinceReview', 'lastExit', 'lastCommit']) {
+    assert.ok(key in p, `missing ${key} on project snapshot`);
+  }
+  assert.ok(
+    ['running', 'queued', 'sleeping', 'awaiting-review', 'stopped', 'cooldown', 'fatal'].includes(p.status),
+    `unexpected status ${p.status}`
+  );
+});

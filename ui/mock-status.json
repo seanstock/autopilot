@@ -1,0 +1,163 @@
+{
+  "daemon": { "pid": 18244, "startedIso": "2026-07-20T02:08:00-07:00", "version": "0.2.0", "paused": false },
+  "fatal": null,
+  "budget": {
+    "ok": true,
+    "reason": null,
+    "checkedIso": "2026-07-23T08:20:00-07:00",
+    "windows": [
+      { "name": "five_hour", "pct": 42.1, "resetsAt": "2026-07-23T10:22:40-07:00" },
+      { "name": "seven_day", "pct": 18.0, "resetsAt": "2026-07-27T12:00:00-07:00" }
+    ]
+  },
+  "settings": { "ceilingPct": 75, "graceMinutes": 30, "webhook": null },
+  "current": { "projectId": "spacestation", "cycle": 41, "kind": "work", "startedIso": "2026-07-23T07:45:53-07:00" },
+  "projects": [
+    {
+      "id": "spacestation",
+      "dir": "C:/Users/you/Blender/SpaceStations",
+      "prompt": "Build out the SpaceStation asset kit: modular hab ring, docking collar, solar arrays, interior corridor kit. Keep density consistent with the concept ref in refs/. Prioritize render-time verified fixes over cosmetic claims.",
+      "priority": 1,
+      "enabled": true,
+      "model": "claude-fable-5",
+      "maxCycleMinutes": 120,
+      "criticRatio": 5,
+      "reviewGateCycles": 0,
+      "containment": "standard",
+      "status": "running",
+      "statusDetail": "running cycle 41 (work) · started 07:45:53",
+      "cycle": 41,
+      "sinceReview": 0,
+      "lastExit": "clean",
+      "lastCommit": "abc1234",
+      "_mock": {
+        "activity": [
+          "[2026-07-23T07:45:53-07:00] [daemon] cycle 41 start · work · claude-fable-5 · timeout 120m",
+          "[2026-07-23T07:46:31-07:00] [model] Read PLAN.md, 5 open items. Taking: solar array deployment animation.",
+          "[2026-07-23T07:52:08-07:00] [model] Blocking keyframes for panel unfold, 4 stages, 180 frames.",
+          "[2026-07-23T08:04:40-07:00] [model] Checkpoint: saved solar_deploy_v1.blend, PLAN ticked, WORKLOG updated.",
+          "[2026-07-23T08:04:41-07:00] [daemon] STOP check: absent. budget five_hour 42.1% (ceiling 75%)",
+          "[2026-07-23T08:09:12-07:00] [model] Verifying playback at frame 120: hinge intersects truss. Fixing.",
+          "[2026-07-23T08:14:47-07:00] [model] Hinge fixed, re-verified playback frames 1-180, no intersection.",
+          "[2026-07-23T08:15:01-07:00] [daemon] STOP check: absent. budget five_hour 42.3% (ceiling 75%)",
+          "[2026-07-23T08:18:22-07:00] [model] Checkpoint: solar_deploy_v2.blend saved, WORKLOG line appended.",
+          "[2026-07-23T08:19:40-07:00] [model] Next PLAN item: interior corridor kit, blocking section A."
+        ],
+        "events": [
+          { "t": "2026-07-22T17:40:00-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 36, "kind": "work" },
+          { "t": "2026-07-22T17:58:06-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 36, "kind": "work", "minutes": 18.1, "exit": "usage_limit", "code": 1, "tokens": { "in": 400000, "out": 21000 }, "costUsd": 1.62, "gitDiff": { "files": 3, "ins": 61, "del": 4 }, "commit": "9e0d144" },
+          { "t": "2026-07-22T18:40:00-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 37, "kind": "work" },
+          { "t": "2026-07-22T20:40:03-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 37, "kind": "work", "minutes": 120.0, "exit": "timeout", "code": 1, "tokens": { "in": 2200000, "out": 143000 }, "costUsd": 9.84, "gitDiff": { "files": 14, "ins": 522, "del": 301 }, "commit": "31b5c77" },
+          { "t": "2026-07-22T21:10:00-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 38, "kind": "critic" },
+          { "t": "2026-07-22T21:32:24-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 38, "kind": "critic", "minutes": 22.4, "exit": "clean", "code": 0, "tokens": { "in": 800000, "out": 34000 }, "costUsd": 3.10, "gitDiff": { "files": 1, "ins": 18, "del": 0 }, "commit": "77ac910" },
+          { "t": "2026-07-22T22:20:00-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 39, "kind": "work" },
+          { "t": "2026-07-22T23:21:00-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 39, "kind": "work", "minutes": 61.0, "exit": "context_full", "code": 1, "tokens": { "in": 1900000, "out": 121000 }, "costUsd": 7.55, "gitDiff": { "files": 9, "ins": 238, "del": 12 }, "commit": "f19d02e" },
+          { "t": "2026-07-23T05:20:00-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 40, "kind": "work" },
+          { "t": "2026-07-23T06:12:48-07:00", "project": "spacestation", "ev": "cycle_end", "cycle": 40, "kind": "work", "minutes": 52.8, "exit": "clean", "code": 0, "tokens": { "in": 1400000, "out": 102000 }, "costUsd": 6.20, "gitDiff": { "files": 12, "ins": 410, "del": 55 }, "commit": "abc1234" },
+          { "t": "2026-07-23T07:45:53-07:00", "project": "spacestation", "ev": "cycle_start", "cycle": 41, "kind": "work" }
+        ],
+        "updatesMd": "## 2026-07-23 08:04\nCycle 41, in progress. Blocked out the solar array deployment animation, four unfold stages over 180 frames. Hit a hinge intersecting the truss at frame 120 and fixed it. Next up is the interior corridor kit. Nothing uncertain right now.\n\n## 2026-07-23 06:12\nCycle 40. Finished the docking collar UV fix and re-rendered the affected turntable frames. The seam artifact is gone at render time, verified against the 07-21 output. Started planning the corridor kit before wrapping up.\n\n## 2026-07-22 23:40\nCycle 39. Greeble pass on the hab ring is done, but I ran out of context partway through the writeup, so the WORKLOG for this cycle is thinner than usual. The next critic pass should double-check my density claims against the concept ref.",
+        "planMd": "# PLAN\n\n- [x] Hab ring exterior greeble pass (density match to concept ref)\n- [x] Fix seam lighting artifact on docking collar UVs\n- [ ] Solar array deployment animation, keyframe blocking\n- [ ] Critic finding #12: re-verify render times claimed in WORKLOG 07-21\n- [ ] Interior corridor kit: 3 modular sections + trim sheet"
+      }
+    },
+    {
+      "id": "dante-warehouse",
+      "dir": "C:/Users/you/Dante",
+      "prompt": "Maintain and extend the Dante data warehouse: profile data quality, backfill glossary terms, build out nightly report templates. Flag anything that looks like a migration artifact rather than a live data quality issue.",
+      "priority": 2,
+      "enabled": true,
+      "model": "claude-fable-5",
+      "maxCycleMinutes": 90,
+      "criticRatio": 4,
+      "reviewGateCycles": 0,
+      "containment": "standard",
+      "status": "sleeping",
+      "statusDetail": "sleeping · ceiling reached, resumes ~10:22",
+      "cycle": 17,
+      "sinceReview": 0,
+      "lastExit": "clean",
+      "lastCommit": "20cf881",
+      "_mock": {
+        "activity": [
+          "[2026-07-23T06:57:10-07:00] [model] Wrote up null-rate finding in the glossary, flagged as migration artifact not live issue.",
+          "[2026-07-23T06:58:02-07:00] [daemon] cycle 17 end · clean · 41.3m · +188/-55 · commit 20cf881",
+          "[2026-07-23T06:58:02-07:00] [daemon] budget five_hour 74.8% approaching ceiling 75%",
+          "[2026-07-23T08:10:15-07:00] [daemon] budget five_hour 81.6% over ceiling 75%, sleeping until reset ~10:22"
+        ],
+        "events": [
+          { "t": "2026-07-23T05:40:00-07:00", "project": "dante-warehouse", "ev": "cycle_start", "cycle": 16, "kind": "critic" },
+          { "t": "2026-07-23T05:59:48-07:00", "project": "dante-warehouse", "ev": "cycle_end", "cycle": 16, "kind": "critic", "minutes": 19.8, "exit": "clean", "code": 0, "tokens": { "in": 600000, "out": 28000 }, "costUsd": 2.45, "gitDiff": { "files": 1, "ins": 9, "del": 0 }, "commit": "5d11a09" },
+          { "t": "2026-07-23T06:16:00-07:00", "project": "dante-warehouse", "ev": "cycle_start", "cycle": 17, "kind": "work" },
+          { "t": "2026-07-23T06:58:02-07:00", "project": "dante-warehouse", "ev": "cycle_end", "cycle": 17, "kind": "work", "minutes": 41.3, "exit": "clean", "code": 0, "tokens": { "in": 1000000, "out": 76000 }, "costUsd": 4.80, "gitDiff": { "files": 6, "ins": 188, "del": 23 }, "commit": "20cf881" },
+          { "t": "2026-07-23T08:10:15-07:00", "project": "dante-warehouse", "ev": "sleep", "reason": "ceiling", "until": "2026-07-23T10:22:40-07:00" }
+        ],
+        "updatesMd": "## 2026-07-23 06:58\nCycle 17. Profiled null rates on orders.customer_ref: 4.2% overall, but concentrated in pre-2024 rows, which looks like a migration artifact rather than an ongoing data quality problem. Wrote it up in the glossary. Next is backfilling terms for the revenue views.",
+        "planMd": "# PLAN\n\n- [x] Profile null rates on orders.customer_ref\n- [ ] Backfill glossary terms for revenue views\n- [ ] Nightly report template: exec summary section"
+      }
+    },
+    {
+      "id": "blender-assets",
+      "dir": "C:/Users/you/Blender/AssetLib",
+      "prompt": "Grow the shared kitbash asset library: numbered sets, named collections, catalog thumbnails. Pause for review after every 8 cycles before starting the next set.",
+      "priority": 2,
+      "enabled": true,
+      "model": "claude-sonnet-5",
+      "maxCycleMinutes": 120,
+      "criticRatio": 5,
+      "reviewGateCycles": 8,
+      "containment": "standard",
+      "status": "awaiting-review",
+      "statusDetail": "awaiting-review · 8 cycles since last review",
+      "cycle": 24,
+      "sinceReview": 8,
+      "lastExit": "clean",
+      "lastCommit": "e42d90b",
+      "_mock": {
+        "activity": [
+          "[2026-07-23T01:36:00-07:00] [model] Kitbash set 03: finishing piece 24/24, naming collections.",
+          "[2026-07-23T02:14:02-07:00] [model] Regenerated catalog thumbnails for set 03, all 24 pieces.",
+          "[2026-07-23T02:14:37-07:00] [daemon] cycle 24 end · clean · 38.9m · commit e42d90b",
+          "[2026-07-23T02:14:37-07:00] [daemon] review gate: 8/8 cycles reached, pausing (awaiting-review)"
+        ],
+        "events": [
+          { "t": "2026-07-23T00:50:00-07:00", "project": "blender-assets", "ev": "cycle_start", "cycle": 23, "kind": "work" },
+          { "t": "2026-07-23T01:34:06-07:00", "project": "blender-assets", "ev": "cycle_end", "cycle": 23, "kind": "work", "minutes": 44.1, "exit": "clean", "code": 0, "tokens": { "in": 1100000, "out": 71000 }, "costUsd": 5.35, "gitDiff": { "files": 10, "ins": 256, "del": 40 }, "commit": "8fa2c31" },
+          { "t": "2026-07-23T01:35:00-07:00", "project": "blender-assets", "ev": "cycle_start", "cycle": 24, "kind": "work" },
+          { "t": "2026-07-23T02:14:37-07:00", "project": "blender-assets", "ev": "cycle_end", "cycle": 24, "kind": "work", "minutes": 38.9, "exit": "clean", "code": 0, "tokens": { "in": 900000, "out": 64000 }, "costUsd": 4.42, "gitDiff": { "files": 15, "ins": 301, "del": 87 }, "commit": "e42d90b" }
+        ],
+        "updatesMd": "## 2026-07-23 02:14\nCycle 24. Kitbash set 03 is complete: 24 pieces, named collections, thumbnails regenerated for the catalog. This hits the review gate, so I am pausing here. Please check the catalog renders before I start set 04.",
+        "planMd": "# PLAN\n\n- [x] Kitbash set 03: 24 pieces, collections named\n- [x] Thumbnail renders regenerated for catalog\n- [ ] Await human review before set 04"
+      }
+    },
+    {
+      "id": "notes-site",
+      "dir": "C:/Users/you/notes-site",
+      "prompt": "Migrate the notes site from the old CMS export to a markdown source tree, preserving post dates and slugs.",
+      "priority": 3,
+      "enabled": false,
+      "model": "claude-sonnet-5",
+      "maxCycleMinutes": 60,
+      "criticRatio": 0,
+      "reviewGateCycles": 0,
+      "containment": "off",
+      "status": "stopped",
+      "statusDetail": "stopped · by user 07-21 19:40",
+      "cycle": 3,
+      "sinceReview": 0,
+      "lastExit": "clean",
+      "lastCommit": "b7710e2",
+      "_mock": {
+        "activity": [
+          "[2026-07-21T19:32:00-07:00] [model] Drafted markdown migration plan, did not start execution.",
+          "[2026-07-21T19:40:11-07:00] [daemon] STOP file detected, project stopped"
+        ],
+        "events": [
+          { "t": "2026-07-21T19:05:00-07:00", "project": "notes-site", "ev": "cycle_start", "cycle": 3, "kind": "work" },
+          { "t": "2026-07-21T19:32:00-07:00", "project": "notes-site", "ev": "cycle_end", "cycle": 3, "kind": "work", "minutes": 27.0, "exit": "clean", "code": 0, "tokens": { "in": 500000, "out": 31000 }, "costUsd": 2.10, "gitDiff": { "files": 4, "ins": 94, "del": 12 }, "commit": "b7710e2" }
+        ],
+        "updatesMd": "## 2026-07-21 19:32\nCycle 3. Drafted the plan for migrating posts to a markdown source tree but did not start it; the project was stopped before I began.",
+        "planMd": "# PLAN\n\n- [ ] Migrate posts to markdown source tree"
+      }
+    }
+  ]
+}

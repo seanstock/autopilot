@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autopilot</title>
+<style>
+  :root {
+    --bg: #111111;
+    --surface: #1A1A1A;
+    --surface-2: #242424;
+    --border: #2A2A2A;
+    --text-primary: #E8E8E8;
+    --text-secondary: #888888;
+    --accent: #E03535;
+    --accent-dark: #8F0B0B;
+    --success: #4ADE80;
+    --warning: #FBBF24;
+    --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  }
+  html[data-theme="light"] {
+    --bg: #F7F7F5;
+    --surface: #FFFFFF;
+    --surface-2: #EFEFED;
+    --border: #E3E3E0;
+    --text-primary: #1C1C1C;
+    --text-secondary: #767676;
+    --accent: #2563EB;
+    --accent-dark: #1D4ED8;
+    --success: #16A34A;
+    --warning: #B45309;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--text-primary); font-family: var(--font-ui); font-size: 14px; }
+  body { padding: 32px; }
+  .wrap { max-width: 1400px; margin: 0 auto; }
+  a { color: var(--text-secondary); text-decoration: none; border-bottom: 1px solid var(--border); }
+  a:hover { color: var(--text-primary); border-bottom-color: var(--text-secondary); }
+  a.inert { cursor: default; }
+  button { font-family: var(--font-ui); font-size: 12px; color: var(--text-primary); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  button:hover { border-color: #3a3a3a; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent-dark); border-color: var(--accent-dark); color: #fff; }
+  button.primary:hover { background: #a31212; }
+  html[data-theme="light"] button.primary:hover { background: #1748b5; }
+  button.ghost { background: transparent; }
+  input, select, textarea { font-family: var(--font-ui); font-size: 13px; color: var(--text-primary); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: #444; }
+
+  /* ---------- FATAL banner ---------- */
+  #fatalBanner { display: none; margin-bottom: 24px; border: 1px solid var(--accent); border-radius: 10px; background: linear-gradient(0deg, rgba(224,53,53,.08), rgba(224,53,53,.08)), var(--surface); padding: 16px; align-items: center; gap: 16px; }
+  #fatalBanner.on { display: flex; }
+  #fatalBanner .sig { font-family: var(--font-mono); font-size: 12px; letter-spacing: 2px; color: var(--accent); font-weight: 600; animation: blink 1.2s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: .35; } }
+  #fatalBanner .msg { flex: 1; font-size: 13px; }
+  #fatalBanner .msg span { color: var(--text-secondary); }
+
+  /* ---------- Connection banner ---------- */
+  #connBanner { display: none; margin-bottom: 24px; border: 1px solid var(--warning); border-radius: 10px; background: var(--surface); padding: 12px 16px; align-items: center; gap: 16px; font-size: 13px; color: var(--warning); }
+  #connBanner.on { display: flex; }
+
+  /* ---------- Header ---------- */
+  header { display: flex; align-items: stretch; gap: 16px; margin-bottom: 32px; flex-wrap: wrap; }
+  .brand { display: flex; flex-direction: column; justify-content: center; gap: 6px; width: 360px; padding-right: 24px; border-right: 1px solid var(--border); flex-shrink: 0; }
+  .brand-row { display: flex; align-items: center; justify-content: space-between; }
+  .brand h1 { font-size: 28px; font-weight: 600; letter-spacing: 4px; line-height: 1; }
+  #themeBtn { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); background: transparent; border: 1px solid var(--border); padding: 3px 10px; }
+  #themeBtn:hover { color: var(--text-primary); }
+  .brand h1 em { font-style: normal; color: var(--accent); }
+  .daemon { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+  .dot.paused { background: var(--warning); }
+  .dot.fatal { background: var(--accent); }
+
+  .gauges { display: flex; gap: 16px; flex: 1; flex-wrap: wrap; }
+  .gauge { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 210px; flex: 1; }
+  .gauge .g-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .gauge .g-name { font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); }
+  .gauge .g-pct { font-size: 18px; font-weight: 600; font-family: var(--font-mono); }
+  .gauge .g-pct.warn { color: var(--warning); }
+  .gauge .g-pct.over { color: var(--accent); }
+  .bar { position: relative; height: 6px; background: var(--surface-2); border-radius: 3px; overflow: visible; }
+  .bar .fill { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: #6e6e6e; transition: width .4s; }
+  .bar .fill.warn { background: var(--warning); }
+  .bar .fill.over { background: var(--accent); }
+  .bar .ceil { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--accent); opacity: .8; transition: left .2s; }
+  .gauge .g-reset { margin-top: 8px; font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); }
+
+  .controls { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 230px; }
+  .ctl-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--text-secondary); }
+  .ctl-row .val { font-family: var(--font-mono); color: var(--text-primary); min-width: 34px; text-align: right; }
+  input[type=range] { -webkit-appearance: none; width: 110px; height: 4px; background: var(--surface-2); border-radius: 2px; border: none; padding: 0; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+  .ctl-row input[type=number] { width: 56px; padding: 3px 6px; font-family: var(--font-mono); font-size: 12px; }
+  #pauseBtn { margin-top: 4px; }
+  #pauseBtn.paused { border-color: var(--warning); color: var(--warning); }
+
+  /* ---------- Layout ---------- */
+  .main { display: grid; grid-template-columns: 360px 1fr; gap: 16px; align-items: start; }
+
+  /* ---------- Project list ---------- */
+  .plist-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .plist-head h2 { font-size: 20px; font-weight: 600; }
+  .proj { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; cursor: pointer; }
+  .proj:hover { border-color: #3a3a3a; }
+  .proj.sel { border-color: #4a4a4a; background: linear-gradient(0deg, rgba(255,255,255,.015), rgba(255,255,255,.015)), var(--surface); }
+  .proj .p-top { display: flex; align-items: center; gap: 8px; }
+  .drag { color: #444; font-size: 14px; user-select: none; letter-spacing: -1px; }
+  .p-name { font-size: 16px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prio { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; cursor: pointer; background: transparent; }
+  .prio:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+  .p-status { display: flex; align-items: center; gap: 8px; margin: 8px 0 0 22px; font-size: 12px; font-family: var(--font-mono); color: var(--text-secondary); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--surface-2); font-size: 11px; flex-shrink: 0; }
+  .chip::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); }
+  .chip.running { color: var(--success); border-color: rgba(74,222,128,.25); } .chip.running::before { background: var(--success); }
+  .chip.review { color: var(--warning); border-color: rgba(251,191,36,.25); } .chip.review::before { background: var(--warning); }
+  .chip.sleeping { color: var(--warning); border-color: rgba(251,191,36,.25); } .chip.sleeping::before { background: var(--warning); }
+  .chip.cooldown { color: var(--warning); border-color: rgba(251,191,36,.25); } .chip.cooldown::before { background: var(--warning); }
+  .chip.fatal { color: var(--accent); border-color: rgba(224,53,53,.35); } .chip.fatal::before { background: var(--accent); }
+  .p-actions { display: flex; gap: 8px; margin: 12px 0 0 22px; }
+  .p-actions button { font-size: 11px; padding: 3px 10px; }
+  .p-links { margin: 8px 0 0 22px; font-size: 11px; display: flex; gap: 16px; }
+
+  /* ---------- Detail pane ---------- */
+  .detail { display: flex; flex-direction: column; gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; overflow-x: auto; }
+  .card h3 { font-size: 16px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
+  .card h3 .sub { font-size: 12px; font-weight: 400; color: var(--text-secondary); font-family: var(--font-mono); }
+  .d-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .d-head .d-name { font-size: 20px; font-weight: 600; }
+  .d-head .d-dir { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+  .d-meta { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  .tag { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); border: 1px solid var(--border); background: var(--surface-2); border-radius: 4px; padding: 2px 8px; }
+
+  .tail { font-family: var(--font-mono); font-size: 12px; line-height: 1.7; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; height: 230px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+  .tail .dl { color: var(--text-secondary); }
+  .tail .ml { color: var(--text-primary); }
+  .tail .t { color: #555; }
+  .tail .empty { color: var(--text-secondary); font-style: italic; }
+
+  table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 12px; }
+  th { text-align: left; color: var(--text-secondary); font-weight: 400; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text-primary); white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  td.num { text-align: right; } th.num { text-align: right; }
+  .exit { padding: 1px 6px; border-radius: 4px; font-size: 11px; border: 1px solid var(--border); color: var(--text-secondary); }
+  .exit.clean { color: var(--success); border-color: rgba(74,222,128,.25); }
+  .exit.timeout, .exit.usage_limit { color: var(--warning); border-color: rgba(251,191,36,.25); }
+  .exit.crash { color: var(--accent); border-color: rgba(224,53,53,.35); }
+  .kind-critic { color: var(--warning); }
+  .diff-ins { color: var(--success); } .diff-del { color: var(--accent); }
+
+  .upd { margin-bottom: 16px; font-size: 13px; line-height: 1.65; }
+  .upd:last-child { margin-bottom: 0; }
+  .md-h { font-weight: 600; margin: 12px 0 4px; }
+  .md-h:first-child { margin-top: 0; }
+  .md-blank { height: 8px; }
+  .md-body { font-size: 13px; line-height: 1.65; }
+  .empty-note { color: var(--text-secondary); font-style: italic; font-size: 13px; }
+
+  .plan { font-size: 13px; line-height: 1.9; }
+  .plan .done { color: var(--text-secondary); text-decoration: line-through; }
+  .plan .box { font-family: var(--font-mono); color: var(--text-secondary); margin-right: 8px; text-decoration: none; display: inline-block; }
+  .plan .box.tick { color: var(--success); }
+
+  /* ---------- Modal ---------- */
+  #modalBg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 10; }
+  #modalBg.on { display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; width: 520px; max-width: 92vw; max-height: 84vh; overflow-y: auto; }
+  .modal h3 { font-size: 20px; font-weight: 600; margin-bottom: 16px; }
+  .frow { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
+  .frow label { font-size: 12px; color: var(--text-secondary); }
+  .frow textarea { min-height: 88px; resize: vertical; font-family: var(--font-ui); }
+  .fgrid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  .frow input[type=text] { font-family: var(--font-mono); font-size: 12px; }
+  .switch { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); margin-bottom: 16px; }
+  .modal .m-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .contain-warn { display: none; font-size: 12px; color: var(--accent); margin: -8px 0 16px; }
+
+  /* ---------- inject card ---------- */
+  #injText { width: 100%; resize: vertical; min-height: 60px; }
+  .inj-actions { display: flex; justify-content: flex-end; margin-top: 8px; gap: 8px; }
+  .inj-pending { border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: 6px; padding: 8px 12px; margin-bottom: 16px; background: var(--surface-2); }
+  .inj-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+  .inj-text { font-size: 13px; white-space: pre-wrap; }
+
+  .empty-state { grid-column: 1 / -1; text-align: center; padding: 96px 32px; color: var(--text-secondary); }
+  .empty-state h2 { font-size: 20px; font-weight: 600; color: var(--text-primary); margin-bottom: 12px; }
+  .empty-state code { display: inline-block; margin-top: 12px; font-family: var(--font-mono); font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 14px; color: var(--text-primary); }
+
+  footer { margin-top: 32px; display: flex; gap: 16px; font-size: 11px; color: #555; font-family: var(--font-mono); }
+  footer a { border: none; color: #555; } footer a:hover { color: var(--text-secondary); }
+  ::-webkit-scrollbar { width: 8px; } ::-webkit-scrollbar-thumb { background: var(--surface-2); border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div id="connBanner">Cannot reach the daemon at /api/status. Retrying...</div>
+
+  <div id="fatalBanner">
+    <span class="sig">FATAL</span>
+    <div class="msg" id="fatalMsg">Global stop.</div>
+    <button class="primary" onclick="clearFatal()">Clear FATAL</button>
+  </div>
+
+  <header>
+    <div class="brand">
+      <div class="brand-row">
+        <h1>AUTO<em>PILOT</em></h1>
+        <button id="themeBtn" onclick="toggleTheme()" title="switch theme">light</button>
+      </div>
+      <div class="daemon"><span class="dot" id="daemonDot"></span><span id="daemonTxt">connecting...</span></div>
+    </div>
+
+    <div class="gauges" id="gauges"></div>
+
+    <div class="controls">
+      <div class="ctl-row"><span>ceiling</span><input type="range" id="ceil" min="10" max="100" value="75"><span class="val" id="ceilVal">75%</span></div>
+      <div class="ctl-row"><span>grace</span><input type="number" id="grace" value="30" min="0"> <span>min</span></div>
+      <button id="pauseBtn" onclick="togglePause()">Pause all</button>
+    </div>
+  </header>
+
+  <div class="main" id="main">
+    <div>
+      <div class="plist-head">
+        <h2>Projects</h2>
+        <button class="primary" onclick="openModal()">+ Add project</button>
+      </div>
+      <div id="plist"></div>
+    </div>
+
+    <div class="detail" id="detail"></div>
+  </div>
+
+  <footer>
+    <span id="mockTag"></span>
+    <span style="margin-left:auto">autopilot v0.2</span>
+  </footer>
+</div>
+
+<div id="modalBg" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <h3>Add project</h3>
+    <form id="addForm" onsubmit="submitAdd(event)">
+      <div class="frow"><label>Directory</label>
+        <input type="text" id="f-dir" placeholder="C:/Users/you/some-project" required>
+      </div>
+      <div class="frow"><label>Mission prompt</label>
+        <textarea id="f-prompt" placeholder="What should cycles work toward? This is the Prime Directive text every cycle reads." required></textarea>
+      </div>
+      <div class="fgrid">
+        <div class="frow"><label>Priority</label><input type="number" id="f-priority" value="2" min="1"></div>
+        <div class="frow"><label>Model</label><select id="f-model"><option>claude-fable-5</option><option>claude-opus-4-8</option><option selected>claude-sonnet-5</option></select></div>
+        <div class="frow"><label>Max cycle (min)</label><input type="number" id="f-maxCycle" value="120"></div>
+        <div class="frow"><label>Critic ratio</label><input type="number" id="f-critic" value="5" min="0" title="every Nth cycle is a critic; 0 = off"></div>
+        <div class="frow"><label>Review gate</label><input type="number" id="f-gate" value="0" min="0" title="pause for review after N cycles; 0 = off"></div>
+        <div class="frow"><label>Containment</label><select id="f-contain" onchange="document.getElementById('cwarn').style.display=this.value==='off'?'block':'none'"><option>standard</option><option>off</option></select></div>
+      </div>
+      <div class="contain-warn" id="cwarn">Containment off: no guard hook, no deny rules. API key stripping still applies.</div>
+      <div class="m-actions"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="submit" class="primary">Add &amp; start</button></div>
+    </form>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+/* ============================================================
+   Config / state
+   ============================================================ */
+const isMock = /(?:^|[?&])mock=1(?:&|$)/.test(location.search);
+let status = null;           // last full status snapshot
+let selectedId = null;       // currently selected project id
+let tailLines = [];          // activity lines for the selected project (cap 500)
+let detailCache = { events: [], updatesMd: '', planMd: '' };
+let es = null;               // EventSource
+let mockData = null;         // loaded ui/mock-status.json (mock mode only)
+
+document.getElementById('mockTag').textContent = isMock ? 'mock mode (?mock=1) — buttons are no-ops, see console' : '';
+
+/* ============================================================
+   Escaping + minimal markdown formatting
+   (SECURITY: file content / activity lines are model-written and
+   untrusted. Always escape first; only then apply the small set
+   of formatting rules below on the ALREADY-ESCAPED text.)
+   ============================================================ */
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+// I6 fix: priority/criticRatio/reviewGateCycles are numeric-expected fields
+// coming straight from projects.json / POST bodies with no guaranteed
+// server-side type (see server.js addProject/setPriority/updateSettings).
+// Coercing through Number() here means the interpolated value can only
+// ever be a finite JS number when it reaches either an onclick(...) JS
+// argument context or an innerHTML text context - neither is exploitable
+// once it has passed through this coercion, regardless of what was stored.
+function safeNum(v, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function renderMdLite(raw) {
+  if (!raw || !raw.trim()) return '<div class="empty-note">(empty)</div>';
+  const esc = escapeHtml(raw);
+  const lines = esc.split('\n');
+  return lines.map(line => {
+    let m;
+    if ((m = line.match(/^\s{0,3}#{1,6}\s+(.*)$/))) {
+      return `<div class="md-h">${m[1]}</div>`;
+    }
+    if ((m = line.match(/^(\s*)-\s\[( |x|X)\]\s?(.*)$/))) {
+      const checked = m[2].toLowerCase() === 'x';
+      return `<div class="${checked ? 'done' : ''}"><span class="box ${checked ? 'tick' : ''}">[${checked ? 'x' : ' '}]</span>${m[3]}</div>`;
+    }
+    if (line.trim() === '') return '<div class="md-blank"></div>';
+    return `<div class="md-body">${line}</div>`;
+  }).join('');
+}
+
+/* ============================================================
+   API layer — real fetch, or mock-status.json when ?mock=1
+   ============================================================ */
+async function loadMockData() {
+  if (mockData) return mockData;
+  const res = await fetch('mock-status.json');
+  if (!res.ok) throw new Error('failed to load mock-status.json: ' + res.status);
+  mockData = await res.json();
+  return mockData;
+}
+
+function mockFindProject(id) {
+  return (mockData.projects || []).find(p => p.id === id);
+}
+
+async function mockGet(url) {
+  const u = new URL(url, location.href);
+  const path = u.pathname;
+  await loadMockData();
+  if (/\/api\/status$/.test(path)) return stripMockExtras(mockData);
+  let m;
+  if ((m = path.match(/\/api\/projects\/([^/]+)\/activity$/))) {
+    const p = mockFindProject(decodeURIComponent(m[1]));
+    return { lines: p && p._mock ? p._mock.activity.slice(-200) : [] };
+  }
+  if ((m = path.match(/\/api\/projects\/([^/]+)\/events$/))) {
+    const p = mockFindProject(decodeURIComponent(m[1]));
+    return { events: p && p._mock ? p._mock.events : [] };
+  }
+  if ((m = path.match(/\/api\/projects\/([^/]+)\/file$/))) {
+    const p = mockFindProject(decodeURIComponent(m[1]));
+    const name = u.searchParams.get('name');
+    const content = p && p._mock ? (name === 'PLAN.md' ? p._mock.planMd : p._mock.updatesMd) : '';
+    return { name, content };
+  }
+  console.warn('[mock] unhandled GET', url);
+  return {};
+}
+
+function stripMockExtras(snapshot) {
+  // Deep-ish clone without the _mock testing payload, so the renderer only
+  // ever sees fields that would really be on the Status snapshot.
+  const clone = JSON.parse(JSON.stringify(snapshot));
+  (clone.projects || []).forEach(p => { delete p._mock; });
+  return clone;
+}
+
+async function apiGet(url) {
+  if (isMock) return mockGet(url);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('GET ' + url + ' -> ' + res.status);
+  return res.json();
+}
+
+async function apiPost(url, body) {
+  if (isMock) {
+    console.log('[mock] POST (no-op)', url, body || '');
+    return stripMockExtras(mockData || await loadMockData());
+  }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined
+  });
+  if (!res.ok) throw new Error('POST ' + url + ' -> ' + res.status);
+  return res.json();
+}
+
+async function doAction(url, body) {
+  try {
+    const snap = await apiPost(url, body);
+    if (!isMock) applyStatus(snap);
+  } catch (e) {
+    console.error(e);
+    alert('Action failed: ' + e.message);
+  }
+}
+
+async function sendInject() {
+  const ta = document.getElementById('injText');
+  const text = (ta && ta.value || '').trim();
+  if (!text || !selectedId) return;
+  try {
+    const snap = await apiPost('/api/projects/' + encodeURIComponent(selectedId) + '/inject', { text });
+    if (!isMock) applyStatus(snap);
+    const prev = (detailCache.injectText || '').trim();
+    detailCache.injectText = prev ? prev + '\n\n' + text : text;
+    renderDetailShell(false);
+  } catch (e) {
+    console.error(e);
+    alert('Inject failed: ' + e.message);
+  }
+}
+
+async function clearInject() {
+  if (!selectedId) return;
+  try {
+    if (!isMock) {
+      const res = await fetch('/api/projects/' + encodeURIComponent(selectedId) + '/inject', { method: 'DELETE' });
+      if (!res.ok) throw new Error('DELETE -> ' + res.status);
+      applyStatus(await res.json());
+    }
+    detailCache.injectText = '';
+    renderDetailShell(false);
+  } catch (e) {
+    console.error(e);
+    alert('Clear failed: ' + e.message);
+  }
+}
+
+/* ============================================================
+   Formatting helpers
+   ============================================================ */
+function fmtTokens(n) {
+  if (n == null) return '';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return Math.round(n / 1e3) + 'k';
+  return String(n);
+}
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  if (d > 0) return d + 'd ' + String(h).padStart(2, '0') + 'h ' + String(m).padStart(2, '0') + 'm';
+  if (h > 24) return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+  return h + 'h ' + String(m).padStart(2, '0') + 'm ' + String(s).padStart(2, '0') + 's';
+}
+function timeShort(iso) {
+  // "2026-07-23T07:45:53-07:00" -> "07:45:53"
+  const m = String(iso).match(/T(\d{2}:\d{2}:\d{2})/);
+  return m ? m[1] : String(iso);
+}
+
+const CHIP_TXT = {
+  running: 'running', queued: 'queued', sleeping: 'sleeping',
+  'awaiting-review': 'awaiting-review', stopped: 'stopped',
+  cooldown: 'cooldown', fatal: 'fatal'
+};
+const CHIP_CLS = {
+  running: 'running', queued: '', sleeping: 'sleeping',
+  'awaiting-review': 'review', stopped: '', cooldown: 'cooldown', fatal: 'fatal'
+};
+
+/* ============================================================
+   Header: daemon line, gauges, fatal banner, pause button
+   ============================================================ */
+function renderHeader() {
+  const s = status;
+  const dot = document.getElementById('daemonDot');
+  const txt = document.getElementById('daemonTxt');
+  dot.classList.remove('paused', 'fatal');
+  if (s.fatal) dot.classList.add('fatal');
+  else if (s.daemon.paused) dot.classList.add('paused');
+
+  txt.dataset.started = s.daemon.startedIso;
+  txt.dataset.paused = s.daemon.paused ? '1' : '0';
+  txt.dataset.pid = s.daemon.pid;
+  updateDaemonLine();
+
+  const fb = document.getElementById('fatalBanner');
+  if (s.fatal) {
+    fb.classList.add('on');
+    document.getElementById('fatalMsg').innerHTML =
+      'Global stop: <b>' + escapeHtml(s.fatal.reason) + '</b>. All projects halted. ' +
+      '<span>' + escapeHtml(s.fatal.t || '') + '</span>';
+  } else {
+    fb.classList.remove('on');
+  }
+
+  const pauseBtn = document.getElementById('pauseBtn');
+  pauseBtn.textContent = s.daemon.paused ? 'Resume all' : 'Pause all';
+  pauseBtn.classList.toggle('paused', s.daemon.paused);
+
+  document.getElementById('ceil').value = s.settings.ceilingPct;
+  document.getElementById('ceilVal').textContent = s.settings.ceilingPct + '%';
+  document.getElementById('grace').value = s.settings.graceMinutes;
+
+  renderGauges();
+}
+
+function updateDaemonLine() {
+  const txt = document.getElementById('daemonTxt');
+  if (!txt.dataset.started) return;
+  const paused = txt.dataset.paused === '1';
+  const upSec = (Date.now() - new Date(txt.dataset.started).getTime()) / 1000;
+  txt.textContent = 'daemon running · pid ' + txt.dataset.pid + ' · up ' + fmtDuration(upSec) + (paused ? ' · PAUSED by user' : '');
+}
+
+function renderGauges() {
+  const ceil = status.settings.ceilingPct;
+  const windows = (status.budget && status.budget.windows) || [];
+  document.getElementById('gauges').innerHTML = windows.map(w => `
+    <div class="gauge">
+      <div class="g-head"><span class="g-name">${escapeHtml(w.name)}</span><span class="g-pct">${w.pct.toFixed(1)}%</span></div>
+      <div class="bar"><div class="fill"></div><div class="ceil"></div></div>
+      <div class="g-reset">resets in <span class="cd" data-resets="${escapeHtml(w.resetsAt || '')}">--</span></div>
+    </div>`).join('') || '<div style="color:var(--text-secondary);font-size:12px;">budget unavailable</div>';
+  paintGauges(ceil);
+  tickCountdowns();
+}
+
+function paintGauges(ceil) {
+  const windows = (status.budget && status.budget.windows) || [];
+  document.querySelectorAll('#gauges .gauge').forEach((g, i) => {
+    const w = windows[i];
+    if (!w) return;
+    const pct = w.pct;
+    const fill = g.querySelector('.fill'), label = g.querySelector('.g-pct');
+    fill.style.width = Math.min(pct, 100) + '%';
+    g.querySelector('.ceil').style.left = Math.min(ceil, 100) + '%';
+    fill.className = 'fill'; label.className = 'g-pct';
+    if (pct >= ceil) { fill.classList.add('over'); label.classList.add('over'); }
+    else if (pct >= ceil - 10) { fill.classList.add('warn'); label.classList.add('warn'); }
+  });
+}
+
+function tickCountdowns() {
+  document.querySelectorAll('.cd[data-resets]').forEach(el => {
+    const resets = el.dataset.resets;
+    if (!resets) { el.textContent = '--'; return; }
+    const secs = (new Date(resets).getTime() - Date.now()) / 1000;
+    el.textContent = secs <= 0 ? 'now' : fmtDuration(secs);
+  });
+}
+
+document.getElementById('ceil').addEventListener('input', function () {
+  document.getElementById('ceilVal').textContent = this.value + '%';
+  paintGauges(+this.value);
+});
+document.getElementById('ceil').addEventListener('change', function () {
+  doAction('/api/settings', { ceilingPct: +this.value });
+});
+document.getElementById('grace').addEventListener('change', function () {
+  doAction('/api/settings', { graceMinutes: +this.value });
+});
+
+function togglePause() {
+  if (status.daemon.paused) doAction('/api/resume');
+  else doAction('/api/pause');
+}
+function clearFatal() {
+  doAction('/api/fatal/clear');
+}
+
+setInterval(function () { updateDaemonLine(); tickCountdowns(); }, 1000);
+
+/* ============================================================
+   Project list
+   ============================================================ */
+function actionsFor(p) {
+  const btns = [];
+  if (p.status === 'awaiting-review') {
+    btns.push(`<button class="primary" onclick="event.stopPropagation();doAction('/api/projects/${p.id}/reviewed')">Reviewed</button>`);
+  }
+  if (p.status === 'stopped') {
+    btns.push(`<button onclick="event.stopPropagation();doAction('/api/projects/${p.id}/start')">Start</button>`);
+  } else if (p.status === 'fatal') {
+    btns.push(`<button disabled title="clear global FATAL first">Stop</button>`);
+  } else {
+    btns.push(`<button onclick="event.stopPropagation();doAction('/api/projects/${p.id}/stop')">Stop</button>`);
+  }
+  return btns.join('');
+}
+
+function renderProjectList() {
+  const projects = status.projects || [];
+  if (projects.length === 0) {
+    renderEmptyState();
+    return;
+  }
+  if (!document.getElementById('plist')) resetMainLayout();
+  document.getElementById('plist').innerHTML = projects.map(p => `
+    <div class="proj ${p.id === selectedId ? 'sel' : ''}" onclick="selectProject('${escapeHtml(p.id)}')">
+      <div class="p-top">
+        <span class="drag" title="priority (fixed order in v1)">::</span>
+        <span class="p-name" title="${escapeHtml(p.id)}">${escapeHtml(p.id)}</span>
+        <button class="prio" title="click to change priority" onclick="event.stopPropagation();editPriority('${escapeHtml(p.id)}', ${safeNum(p.priority, 1)})">P${safeNum(p.priority, 1)}</button>
+      </div>
+      <div class="p-status"><span class="chip ${CHIP_CLS[p.status] || ''}">${escapeHtml(CHIP_TXT[p.status] || p.status)}</span><span>${escapeHtml(p.statusDetail || '')}</span></div>
+      <div class="p-actions">${actionsFor(p)}</div>
+      <div class="p-links">
+        <a class="inert" href="#" onclick="return false" title="dir: ${escapeHtml(p.dir)}">open dir</a>
+        <a class="inert" href="#" onclick="return false" title="no diff-view endpoint yet">latest diff ${p.lastCommit ? escapeHtml(p.lastCommit) : ''}</a>
+      </div>
+    </div>`).join('');
+
+  // keep selection valid; auto-select first project if nothing selected yet
+  if (!selectedId || !projects.some(p => p.id === selectedId)) {
+    selectProject(projects[0].id);
+  }
+}
+
+function renderEmptyState() {
+  document.getElementById('main').classList.add('empty');
+  document.getElementById('main').innerHTML = `
+    <div class="empty-state">
+      <h2>No projects yet</h2>
+      <p>Add one from the UI (+ Add project, top of page) or from the CLI:</p>
+      <code>autopilot add &lt;dir&gt;</code>
+    </div>`;
+  selectedId = null;
+}
+
+function resetMainLayout() {
+  document.getElementById('main').classList.remove('empty');
+  document.getElementById('main').innerHTML = `
+    <div>
+      <div class="plist-head">
+        <h2>Projects</h2>
+        <button class="primary" onclick="openModal()">+ Add project</button>
+      </div>
+      <div id="plist"></div>
+    </div>
+    <div class="detail" id="detail"></div>`;
+}
+
+function editPriority(id, current) {
+  if (isMock) { console.log('[mock] priority change (no-op)', id, current); return; }
+  const v = prompt('New priority for ' + id + ' (lower = higher priority):', current);
+  if (v === null) return;
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n) || n < 1) { alert('Priority must be a positive integer.'); return; }
+  if (n === current) return;
+  doAction('/api/projects/' + encodeURIComponent(id) + '/priority', { priority: n });
+}
+
+/* ============================================================
+   Detail pane
+   ============================================================ */
+function findProject(id) {
+  return (status.projects || []).find(p => p.id === id);
+}
+
+async function selectProject(id) {
+  selectedId = id;
+  tailLines = [];
+  detailCache = { events: [], updatesMd: '', planMd: '', injectText: '' };
+  document.querySelectorAll('.proj').forEach(el => el.classList.remove('sel'));
+  renderProjectListSelectionOnly();
+  renderDetailShell(true);
+  try {
+    const [activityRes, eventsRes, updatesRes, planRes, injectRes] = await Promise.all([
+      apiGet('/api/projects/' + encodeURIComponent(id) + '/activity?lines=200'),
+      apiGet('/api/projects/' + encodeURIComponent(id) + '/events?limit=100'),
+      apiGet('/api/projects/' + encodeURIComponent(id) + '/file?name=UPDATES.md'),
+      apiGet('/api/projects/' + encodeURIComponent(id) + '/file?name=PLAN.md'),
+      apiGet('/api/projects/' + encodeURIComponent(id) + '/inject').catch(() => ({ text: '' }))
+    ]);
+    if (id !== selectedId) return; // user picked something else meanwhile
+    tailLines = (activityRes.lines || []).slice(-500);
+    detailCache = {
+      events: eventsRes.events || [],
+      updatesMd: updatesRes.content || '',
+      planMd: planRes.content || '',
+      injectText: injectRes.text || ''
+    };
+    renderDetailShell(false);
+  } catch (e) {
+    console.error(e);
+    renderDetailShell(false, 'Failed to load project detail: ' + e.message);
+  }
+}
+
+function renderProjectListSelectionOnly() {
+  document.querySelectorAll('.proj').forEach(el => {
+    // p-name title attr holds the id (escaped); simplest robust check is re-render fully
+  });
+  renderProjectList();
+}
+
+function renderTailLine(raw) {
+  const m = raw.match(/^\[([^\]]+)\]\s\[([^\]]+)\]\s([\s\S]*)$/);
+  if (!m) return `<div class="dl"><span class="t">--:--:--</span> ${escapeHtml(raw)}</div>`;
+  const [, iso, who, msg] = m;
+  const cls = who === 'model' ? 'ml' : 'dl';
+  const label = who === 'model' ? '' : '[daemon] ';
+  return `<div class="${cls}"><span class="t">${escapeHtml(timeShort(iso))}</span> ${label}${escapeHtml(msg)}</div>`;
+}
+
+function renderDetailShell(loading, errorMsg) {
+  const p = findProject(selectedId);
+  if (!p) { document.getElementById('detail').innerHTML = ''; return; }
+
+  const cycleRows = buildCycleRows(p);
+
+  document.getElementById('detail').innerHTML = `
+    <div class="card d-head">
+      <span class="d-name">${escapeHtml(p.id)}</span>
+      <span class="d-dir">${escapeHtml(p.dir)}</span>
+      <span class="d-meta">
+        <span class="tag">${escapeHtml(p.model)}</span>
+        <span class="tag">critic 1:${safeNum(p.criticRatio, 0) || 'off'}</span>
+        <span class="tag">gate ${safeNum(p.reviewGateCycles, 0) || 'off'}</span>
+        <span class="tag" ${p.containment === 'off' ? 'style="color:var(--accent);border-color:rgba(224,53,53,.35)"' : ''}>containment ${escapeHtml(p.containment)}</span>
+      </span>
+    </div>
+    <div class="card">
+      <h3>Inject <span class="sub">directive for the next work cycle</span></h3>
+      ${detailCache.injectText ? `
+        <div class="inj-pending">
+          <div class="inj-label">queued (next work cycle will triage: simple &rarr; do it; complex &rarr; spec first)</div>
+          <div class="inj-text">${escapeHtml(detailCache.injectText)}</div>
+          <div class="inj-actions"><button onclick="clearInject()">Clear queued</button></div>
+        </div>` : ''}
+      <textarea id="injText" rows="3" placeholder="e.g. Please add a star field to the project."></textarea>
+      <div class="inj-actions"><button class="primary" onclick="sendInject()">Inject into next cycle</button></div>
+    </div>
+    <div class="card">
+      <h3>Updates <span class="sub">UPDATES.md &middot; read-only</span></h3>
+      <div id="updatesBody">${loading ? '<div class="empty-note">loading...</div>' : (errorMsg ? '<div class="empty-note">' + escapeHtml(errorMsg) + '</div>' : renderMdLite(detailCache.updatesMd))}</div>
+    </div>
+    <div class="card">
+      <h3>Activity <span class="sub">ACTIVITY.log &middot; live tail</span></h3>
+      <div class="tail" id="tail">${loading ? '<div class="empty">loading...</div>' : (tailLines.length ? tailLines.map(renderTailLine).join('') : '<div class="empty">(no activity yet)</div>')}</div>
+    </div>
+    <div class="card">
+      <h3>Cycle history <span class="sub">.autopilot/events.jsonl</span></h3>
+      <table>
+        <tr><th class="num">cycle</th><th>kind</th><th class="num">min</th><th>exit</th><th class="num">tokens in/out</th><th class="num">diff</th><th>commit</th></tr>
+        ${cycleRows}
+      </table>
+    </div>
+    <div class="card">
+      <h3>Plan <span class="sub">PLAN.md &middot; read-only</span></h3>
+      <div class="plan" id="planBody">${loading ? '<div class="empty-note">loading...</div>' : (errorMsg ? '' : renderMdLite(detailCache.planMd))}</div>
+    </div>`;
+
+  const t = document.getElementById('tail');
+  if (t) t.scrollTop = t.scrollHeight;
+}
+
+function buildCycleRows(p) {
+  const rows = [];
+  if (status.current && status.current.projectId === p.id) {
+    const c = status.current;
+    const minutes = ((Date.now() - new Date(c.startedIso).getTime()) / 60000).toFixed(1);
+    rows.push(`<tr>
+      <td class="num">${c.cycle}</td>
+      <td class="${c.kind === 'critic' ? 'kind-critic' : ''}">${escapeHtml(c.kind)}</td>
+      <td class="num">${minutes}*</td>
+      <td><span class="exit">running</span></td>
+      <td class="num">&mdash;</td>
+      <td class="num">&mdash;</td>
+      <td></td>
+    </tr>`);
+  }
+  const cycleEnds = (detailCache.events || []).filter(e => e.ev === 'cycle_end').slice().reverse();
+  cycleEnds.forEach(c => {
+    const diff = c.gitDiff && (c.gitDiff.files || c.gitDiff.ins || c.gitDiff.del)
+      ? `<span class="diff-ins">+${c.gitDiff.ins}</span> / <span class="diff-del">-${c.gitDiff.del}</span>`
+      : '';
+    const tok = c.tokens ? fmtTokens(c.tokens.in) + ' / ' + fmtTokens(c.tokens.out) : '';
+    rows.push(`<tr>
+      <td class="num">${c.cycle}</td>
+      <td class="${c.kind === 'critic' ? 'kind-critic' : ''}">${escapeHtml(c.kind)}</td>
+      <td class="num">${c.minutes != null ? c.minutes.toFixed ? c.minutes.toFixed(1) : c.minutes : ''}</td>
+      <td><span class="exit ${escapeHtml(c.exit)}">${escapeHtml(c.exit)}</span></td>
+      <td class="num">${tok}</td>
+      <td class="num">${diff}</td>
+      <td>${c.commit ? escapeHtml(c.commit) : ''}</td>
+    </tr>`);
+  });
+  if (!rows.length) return '<tr><td colspan="7" class="empty-note">(no cycles yet)</td></tr>';
+  return rows.join('');
+}
+
+/* keep only the d-head (config/status) fresh on every status tick without
+   touching the fetched-on-select sections (updates/activity/events/plan) */
+function updateDetailHead() {
+  const p = findProject(selectedId);
+  if (!p) return;
+  const head = document.querySelector('#detail .d-head');
+  if (!head) return;
+  head.innerHTML = `
+    <span class="d-name">${escapeHtml(p.id)}</span>
+    <span class="d-dir">${escapeHtml(p.dir)}</span>
+    <span class="d-meta">
+      <span class="tag">${escapeHtml(p.model)}</span>
+      <span class="tag">critic 1:${safeNum(p.criticRatio, 0) || 'off'}</span>
+      <span class="tag">gate ${safeNum(p.reviewGateCycles, 0) || 'off'}</span>
+      <span class="tag" ${p.containment === 'off' ? 'style="color:var(--accent);border-color:rgba(224,53,53,.35)"' : ''}>containment ${escapeHtml(p.containment)}</span>
+    </span>`;
+  // also refresh the synthetic "current cycle" row + minutes-elapsed display
+  const table = document.querySelector('#detail table');
+  if (table) {
+    const rows = table.querySelectorAll('tr');
+    table.innerHTML = rows[0].outerHTML + buildCycleRows(p);
+  }
+}
+
+/* ============================================================
+   Add-project modal
+   ============================================================ */
+function openModal() { document.getElementById('modalBg').classList.add('on'); }
+function closeModal() { document.getElementById('modalBg').classList.remove('on'); document.getElementById('addForm').reset(); document.getElementById('cwarn').style.display = 'none'; }
+
+async function submitAdd(ev) {
+  ev.preventDefault();
+  const body = {
+    dir: document.getElementById('f-dir').value.trim(),
+    prompt: document.getElementById('f-prompt').value.trim(),
+    priority: +document.getElementById('f-priority').value || 1,
+    model: document.getElementById('f-model').value,
+    maxCycleMinutes: +document.getElementById('f-maxCycle').value || 120,
+    criticRatio: +document.getElementById('f-critic').value || 0,
+    reviewGateCycles: +document.getElementById('f-gate').value || 0,
+    containment: document.getElementById('f-contain').value
+  };
+  if (!body.dir || !body.prompt) { alert('Directory and mission prompt are required.'); return; }
+  try {
+    const snap = await apiPost('/api/projects', body);
+    if (!isMock) applyStatus(snap);
+    closeModal();
+  } catch (e) {
+    console.error(e);
+    alert('Add project failed: ' + e.message);
+  }
+}
+
+/* ============================================================
+   Status apply / SSE
+   ============================================================ */
+function applyStatus(newStatus) {
+  status = newStatus;
+  const scrollY = window.scrollY;
+  renderHeader();
+  renderProjectList();
+  updateDetailHead();
+  window.scrollTo(0, scrollY);
+}
+
+function connectStream() {
+  if (isMock) return;
+  try { es = new EventSource('/api/stream'); }
+  catch (e) { console.error('EventSource failed', e); return; }
+
+  es.addEventListener('status', ev => {
+    setConnOk();
+    try { applyStatus(JSON.parse(ev.data)); }
+    catch (e) { console.error('bad status event', e); }
+  });
+
+  es.addEventListener('activity', ev => {
+    setConnOk();
+    let data;
+    try { data = JSON.parse(ev.data); } catch (e) { return; }
+    if (!selectedId || data.project !== selectedId) return;
+    const tail = document.getElementById('tail');
+    const atBottom = tail && (tail.scrollTop + tail.clientHeight >= tail.scrollHeight - 8);
+    tailLines.push(data.line);
+    if (tailLines.length > 500) tailLines.shift();
+    if (tail) {
+      tail.insertAdjacentHTML('beforeend', renderTailLine(data.line));
+      while (tail.children.length > 500) tail.removeChild(tail.firstChild);
+      if (atBottom) tail.scrollTop = tail.scrollHeight;
+    }
+  });
+
+  es.onerror = () => { setConnBad(); /* EventSource auto-reconnects */ };
+  es.onopen = () => setConnOk();
+}
+
+function setConnBad() { document.getElementById('connBanner').classList.add('on'); }
+function setConnOk() { document.getElementById('connBanner').classList.remove('on'); }
+
+/* ============================================================
+   Theme
+   ============================================================ */
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  document.getElementById('themeBtn').textContent = t === 'light' ? 'dark' : 'light';
+}
+function toggleTheme() {
+  const t = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  try { localStorage.setItem('ap-theme', t); } catch (e) {}
+  applyTheme(t);
+}
+try { applyTheme(localStorage.getItem('ap-theme') || 'dark'); } catch (e) { applyTheme('dark'); }
+
+/* ============================================================
+   Boot
+   ============================================================ */
+async function boot() {
+  try {
+    const snap = isMock ? stripMockExtras(await loadMockData()) : await apiGet('/api/status');
+    setConnOk();
+    status = snap;
+    renderHeader();
+    renderProjectList();
+    connectStream();
+  } catch (e) {
+    console.error(e);
+    setConnBad();
+    if (!isMock) setTimeout(boot, 3000);
+  }
+}
+boot();
+</script>
+</body>
+</html>

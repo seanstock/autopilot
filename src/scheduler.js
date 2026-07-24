@@ -1,0 +1,821 @@
+'use strict';
+
+// Scheduler: the daemon's main loop. Owns priorities, gates, budget-driven
+// sleep, grace, and the one-cycle-at-a-time invariant. Zero npm
+// dependencies, Node built-ins only, CommonJS.
+//
+// The loop is a single async chain (start() kicks off _tick(), which
+// awaits _tickOnce() to completion before scheduling the next _tick() via
+// setTimeout). Because the entire cycle run (runCycleImpl) is awaited
+// in-line inside _tickOnce(), there is no code path by which two cycles
+// can be in flight at once - the "one cycle at a time, globally" rule
+// (SPEC.md section 2) falls out of the control flow shape rather than
+// needing a separate lock.
+//
+// Precedence (docs/plans/2026-07-23-autopilot-build.md, Task 6): the FATAL
+// latch is checked FIRST, before pause, before budget, before any
+// per-project bookkeeping (cooldown, review gate). When fatal is latched
+// everything idles regardless of per-project state.
+
+const fs = require('fs');
+const path = require('path');
+const { EventEmitter } = require('events');
+
+const util = require('./util');
+const state = require('./state');
+const events = require('./events');
+const runner = require('./runner');
+const notifyModule = require('./notify');
+
+const DAEMON_PID_FILENAME = 'daemon.pid';
+const VERSION = '0.2.0';
+
+// SPEC.md section 3: probe the meter-unavailable fallback at most every 15
+// minutes; poll cadence while sleeping is every 15 minutes or resetsAt,
+// whichever is sooner.
+const PROBE_INTERVAL_MS = 15 * 60 * 1000;
+const SLEEP_FALLBACK_MS = 15 * 60 * 1000;
+
+// docs/plans Task 6: 3 crashes within 15 min -> project cooldown 15 min.
+const CRASH_WINDOW_MS = 15 * 60 * 1000;
+const CRASH_LIMIT = 3;
+const COOLDOWN_MS = 15 * 60 * 1000;
+
+// I2 fix: bounded window graceful shutdown gives an in-flight cycle to
+// finish (via the runner's own STOP kill-path) before the daemon process
+// exits, rather than orphaning an unmonitored claude child.
+const SHUTDOWN_GRACE_MS = 30 * 1000;
+
+// Minimum gap between two "Autopilot resuming" toasts. Transitions are
+// still stamped as events every time; only the toast is debounced.
+const NOTIFY_DEBOUNCE_MS = 30 * 60 * 1000;
+
+function pidFilePath() {
+  return path.join(util.AUTOPILOT_HOME, DAEMON_PID_FILENAME);
+}
+
+function stopFilePath(dir) {
+  return path.join(util.projectMeta(dir), 'STOP');
+}
+
+function injectFilePath(dir) {
+  return path.join(util.projectMeta(dir), 'INJECT.md');
+}
+
+function reviewedFilePath(dir) {
+  return path.join(util.projectMeta(dir), 'REVIEWED');
+}
+
+// EPERM means a process with that pid exists but signal permission was
+// denied (still alive); ESRCH (the default thrown error on most platforms
+// for a nonexistent pid) means it is not.
+function isPidAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err && err.code === 'EPERM';
+  }
+}
+
+class Scheduler extends EventEmitter {
+  constructor(opts) {
+    super();
+    const o = opts || {};
+    this.stateObj = o.stateObj || { settings: {}, projects: [] };
+    this.budget = o.budget;
+    this.runCycleImpl = o.runCycleImpl || runner.runCycle;
+    this.notifyImpl = o.notifyImpl || notifyModule.notify;
+    this.tickMs = o.tickMs != null ? o.tickMs : 5000;
+    // Test-only, documented extension (same pattern as budget.js's
+    // minIntervalMs/backoffBaseMs): lets I1 tests observe the sticky-probe
+    // rescue crossing multiple probe intervals without waiting 15 real
+    // minutes. Real callers never set this.
+    this.probeIntervalMs = o.probeIntervalMs != null ? o.probeIntervalMs : PROBE_INTERVAL_MS;
+
+    this.paused = false;
+
+    this._startedIso = null;
+    this._started = false;
+    this._stopped = true;
+    this._timer = null;
+
+    this._current = null; // {projectId, cycle, kind, startedIso} | null
+    this._lastBudget = { ok: true, reason: null, checkedIso: null, windows: [] };
+    this._budgetWasOk = null; // null = not yet observed, then true/false
+    this._effectiveBudgetOk = true; // budget.check() ok, possibly rescued by probeGate
+    this._inGrace = false;
+    this._graceUntil = 0;
+    this._currentSleepReason = null; // dedupe repeated sleep events
+    this._lastProbeAt = 0;
+    this._probeOkUntil = 0; // I1 fix: sticky probe-rescue window, see _tickOnce
+    this._lastPickedId = null; // round-robin cursor among equal priorities
+    this._lastCycleInfo = {}; // projectId -> {lastExit, lastCommit}
+    this._lastSnapshotJson = null;
+    this._currentTickPromise = null; // I2 fix: let stopDaemon() await the in-flight tick
+  }
+
+  // ---- lifecycle ---------------------------------------------------------
+
+  start() {
+    if (this._started) return;
+    const pidFile = pidFilePath();
+    const existing = util.readJson(pidFile, null);
+    if (existing && existing.pid && existing.pid !== process.pid && isPidAlive(existing.pid)) {
+      const err = new Error(`autopilot daemon already running (pid ${existing.pid})`);
+      err.code = 'ALREADY_RUNNING';
+      throw err;
+    }
+
+    util.ensureDir(util.AUTOPILOT_HOME);
+    this._startedIso = util.nowIso();
+    util.writeJson(pidFile, { pid: process.pid, startedIso: this._startedIso });
+
+    this._started = true;
+    this._stopped = false;
+    this._scheduleTick(0);
+  }
+
+  // I2 fix: graceful shutdown must not orphan an in-flight cycle (the daemon
+  // exiting does not kill the spawned claude tree on its own on Windows).
+  // Rather than duplicating the runner's tree-kill/classify/auto-commit
+  // logic here, this reuses the exact mechanism a hand-touched STOP file
+  // already uses end-to-end: it creates the current project's
+  // `.autopilot/STOP` (if not already present), waits for the in-flight
+  // tick to actually finish (bounded to SHUTDOWN_GRACE_MS - the runner
+  // polls for STOP and tree-kills, classifies 'stopped', the scheduler
+  // stamps cycle_end and auto-commit already runs inside runCycle), then
+  // removes the STOP file it created so the project resumes normally next
+  // time the daemon starts.
+  async stopDaemon() {
+    this._stopped = true;
+    if (this._timer) {
+      clearTimeout(this._timer);
+      this._timer = null;
+    }
+
+    await this._waitForInFlightCycle();
+
+    try {
+      const pidFile = pidFilePath();
+      const existing = util.readJson(pidFile, null);
+      if (existing && existing.pid === process.pid) {
+        fs.unlinkSync(pidFile);
+      }
+    } catch (err) {
+      // best effort - nothing to clean up if it's already gone
+    }
+  }
+
+  async _waitForInFlightCycle() {
+    if (!this._currentTickPromise) return;
+
+    const deadline = Date.now() + SHUTDOWN_GRACE_MS;
+    let stoppedDir = null;
+
+    while (this._currentTickPromise && Date.now() < deadline) {
+      if (this._current && !stoppedDir) {
+        const project = state.getProject(this.stateObj, this._current.projectId);
+        if (project) {
+          try {
+            util.ensureDir(util.projectMeta(project.dir));
+            const stopPath = stopFilePath(project.dir);
+            if (!fs.existsSync(stopPath)) {
+              fs.writeFileSync(stopPath, '');
+              stoppedDir = project.dir;
+            }
+          } catch (err) {
+            util.log('scheduler: shutdown STOP write failed for', project.id, String(err && err.message));
+          }
+        }
+      }
+
+      const remaining = Math.max(0, deadline - Date.now());
+      try {
+        await Promise.race([this._currentTickPromise, new Promise((resolve) => setTimeout(resolve, Math.min(200, remaining)))]);
+      } catch (err) {
+        // the tick promise itself never rejects (_tick catches internally);
+        // nothing to do either way.
+      }
+    }
+
+    if (stoppedDir && !this._currentTickPromise) {
+      try {
+        fs.unlinkSync(stopFilePath(stoppedDir));
+      } catch (err) {
+        // best effort - already gone, or never existed
+      }
+    } else if (stoppedDir) {
+      // NEW-2: shutdown deadline hit with the cycle still in flight. The
+      // STOP file is the last brake on that possibly-orphaned child (its
+      // guard blocks every tool call while STOP exists), so leave it in
+      // place; the human clears it by starting the project again.
+      util.log('scheduler: shutdown timed out with a cycle still in flight; leaving STOP in place for', stoppedDir);
+    }
+  }
+
+  _scheduleTick(delayMs) {
+    if (this._stopped) return;
+    this._timer = setTimeout(() => {
+      this._tick();
+    }, delayMs);
+    if (this._timer.unref) this._timer.unref();
+  }
+
+  async _tick() {
+    if (this._stopped) return;
+    this._currentTickPromise = this._tickOnce();
+    try {
+      await this._currentTickPromise;
+    } catch (err) {
+      util.log('scheduler: tick error', String((err && err.stack) || err));
+    } finally {
+      this._currentTickPromise = null;
+    }
+    this._scheduleTick(this.tickMs);
+  }
+
+  // ---- main loop ----------------------------------------------------------
+
+  async _tickOnce() {
+    // 1. FATAL latch, checked first, before anything else (see file header).
+    const fatal = state.readFatal();
+    if (fatal) {
+      this._current = null;
+      this._effectiveBudgetOk = false;
+      this._emitStatusIfChanged();
+      return;
+    }
+
+    // 2. Global pause.
+    if (this.paused) {
+      this._current = null;
+      this._emitStatusIfChanged();
+      return;
+    }
+
+    // 3. Budget check (ceiling / outage / recovery / grace).
+    const budgetResult = await this.budget.check();
+    this._lastBudget = budgetResult;
+
+    let effectiveOk = budgetResult.ok;
+
+    if (budgetResult.ok) {
+      // Real recovery: any earlier probe-rescue window is stale now, clear
+      // it so a later outage does not inherit a sticky "ok" from long ago.
+      this._probeOkUntil = 0;
+    } else if (budgetResult.reason === 'outage' && typeof this.budget.probeGate === 'function') {
+      const now = Date.now();
+
+      // I1 fix: a successful probe used to rescue only the single tick it
+      // ran on - every tick in between probes (the overwhelming majority,
+      // since probes are rate-limited to once per PROBE_INTERVAL_MS) saw
+      // the still-down meter, reasserted not-ok, and flip-flopped
+      // _budgetWasOk. That refired notify + grace_start on every probe
+      // interval and meant graceMinutes (default 30, longer than the probe
+      // interval) never got a single continuous "ok" window long enough to
+      // actually elapse in - outage mode never ran a cycle. Fix: treat a
+      // successful probe as sticky-ok for a full PROBE_INTERVAL_MS window,
+      // and only refire the recovery/grace transition once, on entry into
+      // that state (via the existing _budgetWasOk state machine below).
+      if (now - this._lastProbeAt >= this.probeIntervalMs) {
+        this._lastProbeAt = now;
+        let probe;
+        try {
+          probe = await this.budget.probeGate();
+        } catch (err) {
+          probe = { ok: false };
+        }
+        this._probeOkUntil = probe && probe.ok ? now + this.probeIntervalMs : 0;
+      }
+      if (this._probeOkUntil && now < this._probeOkUntil) {
+        effectiveOk = true;
+      }
+    }
+
+    if (!effectiveOk) {
+      const reason = budgetResult.reason || 'outage';
+      if (this._currentSleepReason !== reason) {
+        const until = budgetResult.resetsAt || new Date(Date.now() + SLEEP_FALLBACK_MS).toISOString();
+        this._appendGlobalEvent('sleep', { reason, until });
+        this._currentSleepReason = reason;
+      }
+      this._budgetWasOk = false;
+      this._effectiveBudgetOk = false;
+      this._inGrace = false;
+      this._current = null;
+      this._emitStatusIfChanged();
+      return;
+    }
+
+    this._currentSleepReason = null;
+    this._effectiveBudgetOk = true;
+
+    // Transition not-ok -> ok: notify + grace_start + wait graceMinutes
+    // before the first cycle. This is the budget-recovery grace only -
+    // manual pauseAll()/resumeAll() never touch _budgetWasOk, so a manual
+    // resume never incurs this wait (see pauseAll/resumeAll below).
+    if (this._budgetWasOk === false) {
+      this._budgetWasOk = true;
+      const graceMinutes = (this.stateObj.settings && this.stateObj.settings.graceMinutes) || 0;
+      // Toast debounce, belt-and-braces: the budget fix (see
+      // budget._outageResult) removed the known flap sources, but a toast
+      // storm is a miserable failure mode for the human (hundreds of
+      // queued beeping notifications, observed live 2026-07-23), so the
+      // recovery toast itself is also rate-limited. Events keep stamping
+      // every transition - only the toast is suppressed.
+      const now = Date.now();
+      if (now - (this._lastRecoveryNotifyAt || 0) >= NOTIFY_DEBOUNCE_MS) {
+        this._lastRecoveryNotifyAt = now;
+        try {
+          this.notifyImpl('Autopilot resuming', 'Usage budget is runnable again', this.stateObj.settings);
+        } catch (err) {
+          util.log('scheduler: notifyImpl threw', String(err && err.message));
+        }
+      }
+      this._appendGlobalEvent('grace_start', { minutes: graceMinutes });
+      this._graceUntil = Date.now() + graceMinutes * 60000;
+      this._inGrace = graceMinutes > 0;
+    } else if (this._budgetWasOk === null) {
+      this._budgetWasOk = true; // initial state: not a recovery, no grace
+    }
+
+    if (this._graceUntil && Date.now() < this._graceUntil) {
+      this._inGrace = true;
+      this._current = null;
+      this._emitStatusIfChanged();
+      return;
+    }
+    this._graceUntil = 0;
+    this._inGrace = false;
+
+    // 4. Pick a runnable project.
+    const runnable = this._computeRunnable();
+    if (runnable.length === 0) {
+      this._current = null;
+      this._emitStatusIfChanged();
+      return;
+    }
+
+    const minPriority = Math.min(...runnable.map((r) => r.project.priority));
+    const tier = runnable.filter((r) => r.project.priority === minPriority);
+    const picked = this._pickFromTier(tier);
+    this._lastPickedId = picked.project.id;
+
+    // 5. Run it.
+    await this._runOneCycle(picked.project, picked.runtime);
+    this._emitStatusIfChanged();
+  }
+
+  _computeRunnable() {
+    const now = Date.now();
+    const runnable = [];
+    for (const project of this.stateObj.projects || []) {
+      if (!project.enabled) continue;
+      if (fs.existsSync(stopFilePath(project.dir))) continue;
+
+      const runtime = state.readRuntime(project.dir);
+      if (runtime.cooldownUntil && Date.parse(runtime.cooldownUntil) > now) continue;
+
+      if (project.reviewGateCycles > 0 && runtime.sinceReview >= project.reviewGateCycles) {
+        // Review gate: pauses at N until markReviewed() (server/CLI) or a
+        // hand-touched REVIEWED file. Consume+delete it here so a project
+        // left running with the daemon down still resumes on next tick.
+        const reviewedPath = reviewedFilePath(project.dir);
+        if (fs.existsSync(reviewedPath)) {
+          try {
+            fs.unlinkSync(reviewedPath);
+          } catch (err) {
+            // best effort
+          }
+          runtime.sinceReview = 0;
+          state.writeRuntime(project.dir, runtime);
+          try {
+            events.appendEvent(project.dir, project.id, 'reviewed', {});
+          } catch (err) {
+            // best effort
+          }
+        } else {
+          continue;
+        }
+      }
+
+      runnable.push({ project, runtime });
+    }
+    return runnable;
+  }
+
+  // Round-robin among equal priorities: remembers the last picked project
+  // id across ticks and advances to the next id in the current tier
+  // (falls back to index 0 whenever the last pick isn't in this tier -
+  // e.g. it just went into cooldown or the priority set changed).
+  _pickFromTier(tier) {
+    if (tier.length === 1) return tier[0];
+    const ids = tier.map((t) => t.project.id);
+    const lastIdx = ids.indexOf(this._lastPickedId);
+    const nextIdx = lastIdx === -1 ? 0 : (lastIdx + 1) % ids.length;
+    return tier[nextIdx];
+  }
+
+  async _runOneCycle(project, runtime, forcedKind) {
+    const cycleNumber = (runtime.cycle || 0) + 1;
+    const criticRatio = project.criticRatio || 0;
+    // A pending user directive (INJECT.md) forces the next cycle to be a
+    // work cycle even if the critic cadence lands here - the human asked
+    // for it "next run", and only work cycles consume injections. The
+    // critic simply fires on its next matching cycle number.
+    const injectPending = !forcedKind && fs.existsSync(injectFilePath(project.dir));
+    const kind = forcedKind || (!injectPending && criticRatio > 0 && cycleNumber % criticRatio === 0 ? 'critic' : 'work');
+
+    this._current = { projectId: project.id, cycle: cycleNumber, kind, startedIso: util.nowIso() };
+    this._emitStatusIfChanged();
+
+    try {
+      events.appendEvent(project.dir, project.id, 'cycle_start', { cycle: cycleNumber, kind });
+    } catch (err) {
+      util.log('scheduler: appendEvent cycle_start failed', String(err && err.message));
+    }
+
+    let result;
+    try {
+      result = await this.runCycleImpl({
+        project,
+        kind,
+        cycleNumber,
+        budget: this.budget,
+        claudeCmd: project.claudeCmd,
+      });
+    } catch (err) {
+      // runCycle's contract is "never rejects"; guard anyway so a broken
+      // injected fake cannot take down the scheduler loop itself.
+      util.log('scheduler: runCycleImpl threw (contract violation)', String(err && err.message));
+      result = {
+        exit: 'crash',
+        code: null,
+        minutes: 0,
+        tokens: { in: 0, out: 0 },
+        costUsd: null,
+        commit: null,
+        gitDiff: { files: 0, ins: 0, del: 0 },
+      };
+    }
+
+    try {
+      events.appendEvent(project.dir, project.id, 'cycle_end', {
+        cycle: cycleNumber,
+        kind,
+        minutes: result.minutes,
+        exit: result.exit,
+        code: result.code,
+        tokens: result.tokens,
+        costUsd: result.costUsd,
+        gitDiff: result.gitDiff,
+        commit: result.commit,
+      });
+    } catch (err) {
+      util.log('scheduler: appendEvent cycle_end failed', String(err && err.message));
+    }
+
+    // A usage_limit exit already proved the account is over ceiling; flip
+    // the budget manager immediately rather than waiting for the next
+    // 60s-gated poll (SPEC.md section 3). The real runner already calls
+    // this too - calling it again here is a harmless idempotent duplicate,
+    // and is what makes this work even with an injected fake runCycleImpl
+    // that never touches the budget object itself.
+    if (result.exit === 'usage_limit' && this.budget && typeof this.budget.noteUsageLimitExit === 'function') {
+      try {
+        this.budget.noteUsageLimitExit();
+      } catch (err) {
+        util.log('scheduler: noteUsageLimitExit threw', String(err && err.message));
+      }
+    }
+
+    runtime.cycle = cycleNumber;
+    runtime.sinceReview = (runtime.sinceReview || 0) + 1;
+
+    if (result.exit === 'crash') {
+      const now = Date.now();
+      const kept = (runtime.failTimes || []).filter((t) => {
+        const ms = Date.parse(t);
+        return Number.isFinite(ms) && now - ms < CRASH_WINDOW_MS;
+      });
+      kept.push(util.nowIso());
+      runtime.failTimes = kept;
+      if (kept.length >= CRASH_LIMIT) {
+        runtime.cooldownUntil = new Date(now + COOLDOWN_MS).toISOString();
+        runtime.failTimes = [];
+        try {
+          events.appendEvent(project.dir, project.id, 'sleep', { reason: 'cooldown', until: runtime.cooldownUntil });
+        } catch (err) {
+          // best effort
+        }
+      }
+    } else if (result.exit === 'clean') {
+      runtime.failTimes = [];
+    }
+
+    state.writeRuntime(project.dir, runtime);
+    this._lastCycleInfo[project.id] = { lastExit: result.exit, lastCommit: result.commit };
+    this._current = null;
+
+    // Cap summary (user directive 2026-07-23): when a chain dies of usage
+    // exhaustion, its per-checkpoint UPDATES entries can still end
+    // mid-thought - run ONE short wrapup cycle whose only job is a
+    // plain-English summary entry in UPDATES.md. This deliberately runs
+    // slightly over the cap (accepted by the user; disable with
+    // settings.capSummary = false). A wrapup's own exit can never trigger
+    // another wrapup, so it cannot chain.
+    const capSummary = !this.stateObj.settings || this.stateObj.settings.capSummary !== false;
+    if (result.exit === 'usage_limit' && kind !== 'wrapup' && capSummary) {
+      const freshRuntime = state.readRuntime(project.dir);
+      const wrapProject = Object.assign({}, project, {
+        maxCycleMinutes: Math.min(10, project.maxCycleMinutes || 10),
+      });
+      await this._runOneCycle(wrapProject, freshRuntime, 'wrapup');
+    }
+  }
+
+  // Some events (sleep for ceiling/outage/paused, grace_start) are global
+  // budget-manager concepts, not per-project ones, but events.jsonl only
+  // exists inside each project's own .autopilot/ directory (SPEC.md
+  // section 4) - there is no separate global log. We replicate these
+  // events into every known project's log so each project's own audit
+  // trail explains why it wasn't running.
+  _appendGlobalEvent(ev, fields) {
+    for (const project of this.stateObj.projects || []) {
+      try {
+        events.appendEvent(project.dir, project.id, ev, fields);
+      } catch (err) {
+        util.log('scheduler: appendEvent (global)', ev, 'failed for', project.id, String(err && err.message));
+      }
+    }
+  }
+
+  // ---- status --------------------------------------------------------------
+
+  _projectStatus(project) {
+    const runtime = state.readRuntime(project.dir);
+    const now = Date.now();
+    const stopped = !project.enabled || fs.existsSync(stopFilePath(project.dir));
+    const inCooldown = !!(runtime.cooldownUntil && Date.parse(runtime.cooldownUntil) > now);
+    const inReview =
+      project.reviewGateCycles > 0 &&
+      runtime.sinceReview >= project.reviewGateCycles &&
+      !fs.existsSync(reviewedFilePath(project.dir));
+    const isCurrent = !!(this._current && this._current.projectId === project.id);
+
+    let status;
+    let statusDetail;
+    if (stopped) {
+      status = 'stopped';
+      statusDetail = project.enabled ? 'STOP file present' : 'disabled';
+    } else if (inReview) {
+      status = 'awaiting-review';
+      statusDetail = `awaiting review (${runtime.sinceReview}/${project.reviewGateCycles})`;
+    } else if (inCooldown) {
+      status = 'cooldown';
+      statusDetail = `cooldown until ${runtime.cooldownUntil}`;
+    } else if (isCurrent) {
+      status = 'running';
+      statusDetail = `cycle ${this._current.cycle} (${this._current.kind})`;
+    } else if (this.paused || !this._effectiveBudgetOk || this._inGrace) {
+      status = 'sleeping';
+      statusDetail = this.paused
+        ? 'paused'
+        : this._inGrace
+        ? 'grace period'
+        : (this._lastBudget && this._lastBudget.reason) || 'sleeping';
+    } else {
+      status = 'queued';
+      statusDetail = 'queued';
+    }
+
+    const info = this._lastCycleInfo[project.id] || {};
+    let pendingInject = false;
+    try {
+      pendingInject = fs.existsSync(injectFilePath(project.dir));
+    } catch (err) {
+      // best effort
+    }
+    return {
+      status,
+      statusDetail,
+      cycle: runtime.cycle,
+      sinceReview: runtime.sinceReview,
+      lastExit: info.lastExit || null,
+      lastCommit: info.lastCommit || null,
+      pendingInject,
+    };
+  }
+
+  // Status snapshot (docs/plans Shared contracts): the exact shape the
+  // already-built UI codes against. Field names matter.
+  snapshot() {
+    const fatalRecord = state.readFatal();
+
+    const projects = (this.stateObj.projects || []).map((project) => {
+      const base = Object.assign({}, project);
+      if (fatalRecord) {
+        const runtime = state.readRuntime(project.dir);
+        const info = this._lastCycleInfo[project.id] || {};
+        return Object.assign(base, {
+          status: 'fatal',
+          statusDetail: 'fatal latched',
+          cycle: runtime.cycle,
+          sinceReview: runtime.sinceReview,
+          lastExit: info.lastExit || null,
+          lastCommit: info.lastCommit || null,
+        });
+      }
+      return Object.assign(base, this._projectStatus(project));
+    });
+
+    return {
+      daemon: {
+        pid: process.pid,
+        startedIso: this._startedIso,
+        version: VERSION,
+        paused: this.paused,
+      },
+      fatal: fatalRecord,
+      budget: {
+        ok: this._lastBudget.ok,
+        reason: this._lastBudget.reason,
+        checkedIso: this._lastBudget.checkedIso,
+        windows: this._lastBudget.windows || [],
+      },
+      settings: {
+        ceilingPct: this.stateObj.settings.ceilingPct,
+        graceMinutes: this.stateObj.settings.graceMinutes,
+        webhook: this.stateObj.settings.webhook,
+      },
+      current: fatalRecord ? null : this._current,
+      projects,
+    };
+  }
+
+  _emitStatusIfChanged() {
+    const snap = this.snapshot();
+    const json = JSON.stringify(snap);
+    if (json !== this._lastSnapshotJson) {
+      this._lastSnapshotJson = json;
+      this.emit('status', snap);
+    }
+    return snap;
+  }
+
+  // ---- commands (used by server.js) ---------------------------------------
+
+  pauseAll() {
+    if (!this.paused) {
+      this.paused = true;
+      this._appendGlobalEvent('sleep', { reason: 'paused', until: null });
+    }
+    this._emitStatusIfChanged();
+  }
+
+  // Manual resume deliberately does not touch _budgetWasOk/_graceUntil: the
+  // budget-recovery grace period is a separate gate from the global pause,
+  // so a human manually unpausing never incurs it (docs/plans Task 6: grace
+  // is "skipped when resume was manual").
+  resumeAll() {
+    this.paused = false;
+    this._emitStatusIfChanged();
+  }
+
+  startProject(id) {
+    const project = state.getProject(this.stateObj, id);
+    if (!project) return false;
+    project.enabled = true;
+    try {
+      fs.unlinkSync(stopFilePath(project.dir));
+    } catch (err) {
+      // already absent
+    }
+    state.save(this.stateObj);
+    this._emitStatusIfChanged();
+    return true;
+  }
+
+  stopProject(id) {
+    const project = state.getProject(this.stateObj, id);
+    if (!project) return false;
+    util.ensureDir(util.projectMeta(project.dir));
+    fs.writeFileSync(stopFilePath(project.dir), '');
+    try {
+      events.appendEvent(project.dir, project.id, 'sleep', { reason: 'stop', until: null });
+    } catch (err) {
+      // best effort
+    }
+    this._emitStatusIfChanged();
+    return true;
+  }
+
+  // Injection commands (SPEC "Injection"): the daemon owns INJECT.md; the
+  // next work cycle consumes it via the runner. Multiple injections before
+  // that cycle stack in arrival order.
+  addInjection(id, text) {
+    const project = state.getProject(this.stateObj, id);
+    if (!project) return false;
+    const clean = String(text == null ? '' : text).trim();
+    if (!clean) return false;
+    util.ensureDir(util.projectMeta(project.dir));
+    const p = injectFilePath(project.dir);
+    const existing = fs.existsSync(p) ? String(fs.readFileSync(p, 'utf8')) : '';
+    fs.writeFileSync(p, existing ? `${existing.replace(/\s+$/, '')}\n\n${clean}\n` : `${clean}\n`);
+    try {
+      events.activity(project.dir, `user directive queued for next cycle: ${clean.slice(0, 160)}`, 'daemon');
+    } catch (err) {
+      // best effort
+    }
+    this._emitStatusIfChanged();
+    return true;
+  }
+
+  getInjection(id) {
+    const project = state.getProject(this.stateObj, id);
+    if (!project) return null;
+    const p = injectFilePath(project.dir);
+    try {
+      return fs.existsSync(p) ? String(fs.readFileSync(p, 'utf8')) : '';
+    } catch (err) {
+      return '';
+    }
+  }
+
+  clearInjection(id) {
+    const project = state.getProject(this.stateObj, id);
+    if (!project) return false;
+    try {
+      fs.unlinkSync(injectFilePath(project.dir));
+    } catch (err) {
+      // already absent
+    }
+    this._emitStatusIfChanged();
+    return true;
+  }
+
+  markReviewed(id) {
+    const project = state.getProject(this.stateObj, id);
+    if (!project) return false;
+    const runtime = state.readRuntime(project.dir);
+    runtime.sinceReview = 0;
+    state.writeRuntime(project.dir, runtime);
+    try {
+      fs.unlinkSync(reviewedFilePath(project.dir));
+    } catch (err) {
+      // already absent
+    }
+    try {
+      events.appendEvent(project.dir, project.id, 'reviewed', {});
+    } catch (err) {
+      // best effort
+    }
+    this._emitStatusIfChanged();
+    return true;
+  }
+
+  setPriority(id, n) {
+    const project = state.getProject(this.stateObj, id);
+    if (!project) return false;
+    // I6 fix (server-side half): reject a non-numeric priority rather than
+    // storing it verbatim - projects.json is rendered back into the UI's
+    // DOM (see I6/ui/index.html), so an unvalidated value here is reachable
+    // stored-XSS, not just a display glitch.
+    const num = Number(n);
+    if (!Number.isFinite(num)) return false;
+    project.priority = num;
+    state.save(this.stateObj);
+    this._emitStatusIfChanged();
+    return true;
+  }
+
+  addProject(cfg) {
+    const project = state.addProject(this.stateObj, cfg);
+    state.save(this.stateObj);
+    this._emitStatusIfChanged();
+    return project;
+  }
+
+  updateSettings(patch) {
+    Object.assign(this.stateObj.settings, patch || {});
+    state.save(this.stateObj);
+    this._emitStatusIfChanged();
+    return this.stateObj.settings;
+  }
+
+  clearFatal() {
+    state.clearFatal();
+    if (this.budget && typeof this.budget.clearFatal === 'function') {
+      try {
+        this.budget.clearFatal();
+      } catch (err) {
+        // best effort
+      }
+    }
+    this._emitStatusIfChanged();
+  }
+}
+
+module.exports = { Scheduler };

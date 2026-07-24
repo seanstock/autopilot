@@ -1,0 +1,15 @@
+{
+  "name": "autopilot",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Local-first token furnace: one daemon running autonomous Claude Code cycles against registered projects, governed by a global usage budget, observable from a localhost UI.",
+  "bin": {
+    "autopilot": "./autopilot.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\""
+  }
+}

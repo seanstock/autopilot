@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autopilot</title>
+<style>
+  :root {
+    --bg: #111111;
+    --surface: #1A1A1A;
+    --surface-2: #242424;
+    --border: #2A2A2A;
+    --text-primary: #E8E8E8;
+    --text-secondary: #888888;
+    --accent: #E03535;
+    --accent-dark: #8F0B0B;
+    --success: #4ADE80;
+    --warning: #FBBF24;
+    --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  }
+  html[data-theme="light"] {
+    --bg: #F7F7F5;
+    --surface: #FFFFFF;
+    --surface-2: #EFEFED;
+    --border: #E3E3E0;
+    --text-primary: #1C1C1C;
+    --text-secondary: #767676;
+    --accent: #2563EB;
+    --accent-dark: #1D4ED8;
+    --success: #16A34A;
+    --warning: #B45309;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--text-primary); font-family: var(--font-ui); font-size: 14px; }
+  body { padding: 32px; }
+  .wrap { max-width: 1400px; margin: 0 auto; }
+  a { color: var(--text-secondary); text-decoration: none; border-bottom: 1px solid var(--border); }
+  a:hover { color: var(--text-primary); border-bottom-color: var(--text-secondary); }
+  button { font-family: var(--font-ui); font-size: 12px; color: var(--text-primary); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  button:hover { border-color: #3a3a3a; }
+  button.primary { background: var(--accent-dark); border-color: var(--accent-dark); }
+  button.primary:hover { background: #a31212; }
+  button.ghost { background: transparent; }
+  input, select, textarea { font-family: var(--font-ui); font-size: 13px; color: var(--text-primary); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: #444; }
+
+  /* ---------- FATAL banner ---------- */
+  #fatalBanner { display: none; margin-bottom: 24px; border: 1px solid var(--accent); border-radius: 10px; background: linear-gradient(0deg, rgba(224,53,53,.08), rgba(224,53,53,.08)), var(--surface); padding: 16px; align-items: center; gap: 16px; }
+  #fatalBanner.on { display: flex; }
+  #fatalBanner .sig { font-family: var(--font-mono); font-size: 12px; letter-spacing: 2px; color: var(--accent); font-weight: 600; animation: blink 1.2s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: .35; } }
+  #fatalBanner .msg { flex: 1; font-size: 13px; }
+  #fatalBanner .msg span { color: var(--text-secondary); }
+
+  /* ---------- Header ---------- */
+  header { display: flex; align-items: stretch; gap: 16px; margin-bottom: 32px; flex-wrap: wrap; }
+  .brand { display: flex; flex-direction: column; justify-content: center; gap: 6px; width: 360px; padding-right: 24px; border-right: 1px solid var(--border); flex-shrink: 0; }
+  .brand-row { display: flex; align-items: center; justify-content: space-between; }
+  .brand h1 { font-size: 28px; font-weight: 600; letter-spacing: 4px; line-height: 1; }
+  #themeBtn { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); background: transparent; border: 1px solid var(--border); padding: 3px 10px; }
+  #themeBtn:hover { color: var(--text-primary); }
+  .brand h1 em { font-style: normal; color: var(--accent); }
+  .daemon { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+  .dot.paused { background: var(--warning); }
+  .dot.fatal { background: var(--accent); }
+
+  .gauges { display: flex; gap: 16px; flex: 1; flex-wrap: wrap; }
+  .gauge { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 210px; flex: 1; }
+  .gauge .g-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .gauge .g-name { font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); }
+  .gauge .g-pct { font-size: 18px; font-weight: 600; font-family: var(--font-mono); }
+  .gauge .g-pct.warn { color: var(--warning); }
+  .gauge .g-pct.over { color: var(--accent); }
+  .bar { position: relative; height: 6px; background: var(--surface-2); border-radius: 3px; overflow: visible; }
+  .bar .fill { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: #6e6e6e; transition: width .4s; }
+  .bar .fill.warn { background: var(--warning); }
+  .bar .fill.over { background: var(--accent); }
+  .bar .ceil { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--accent); opacity: .8; transition: left .2s; }
+  .gauge .g-reset { margin-top: 8px; font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); }
+
+  .controls { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 230px; }
+  .ctl-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--text-secondary); }
+  .ctl-row .val { font-family: var(--font-mono); color: var(--text-primary); min-width: 34px; text-align: right; }
+  input[type=range] { -webkit-appearance: none; width: 110px; height: 4px; background: var(--surface-2); border-radius: 2px; border: none; padding: 0; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+  .ctl-row input[type=number] { width: 56px; padding: 3px 6px; font-family: var(--font-mono); font-size: 12px; }
+  #pauseBtn { margin-top: 4px; }
+  #pauseBtn.paused { border-color: var(--warning); color: var(--warning); }
+
+  /* ---------- Layout ---------- */
+  .main { display: grid; grid-template-columns: 360px 1fr; gap: 16px; align-items: start; }
+
+  /* ---------- Project list ---------- */
+  .plist-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .plist-head h2 { font-size: 20px; font-weight: 600; }
+  .proj { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; cursor: pointer; }
+  .proj:hover { border-color: #3a3a3a; }
+  .proj.sel { border-color: #4a4a4a; background: linear-gradient(0deg, rgba(255,255,255,.015), rgba(255,255,255,.015)), var(--surface); }
+  .proj .p-top { display: flex; align-items: center; gap: 8px; }
+  .drag { color: #444; font-size: 14px; cursor: grab; user-select: none; letter-spacing: -1px; }
+  .p-name { font-size: 16px; font-weight: 600; flex: 1; }
+  .prio { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; }
+  .p-status { display: flex; align-items: center; gap: 8px; margin: 8px 0 0 22px; font-size: 12px; font-family: var(--font-mono); color: var(--text-secondary); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--surface-2); font-size: 11px; }
+  .chip::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); }
+  .chip.running { color: var(--success); border-color: rgba(74,222,128,.25); } .chip.running::before { background: var(--success); }
+  .chip.review { color: var(--warning); border-color: rgba(251,191,36,.25); } .chip.review::before { background: var(--warning); }
+  .chip.fatal { color: var(--accent); border-color: rgba(224,53,53,.35); } .chip.fatal::before { background: var(--accent); }
+  .p-actions { display: flex; gap: 8px; margin: 12px 0 0 22px; }
+  .p-actions button { font-size: 11px; padding: 3px 10px; }
+  .p-links { margin: 8px 0 0 22px; font-size: 11px; display: flex; gap: 16px; }
+
+  /* ---------- Detail pane ---------- */
+  .detail { display: flex; flex-direction: column; gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .card h3 { font-size: 16px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: baseline; justify-content: space-between; }
+  .card h3 .sub { font-size: 12px; font-weight: 400; color: var(--text-secondary); font-family: var(--font-mono); }
+  .d-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .d-head .d-name { font-size: 20px; font-weight: 600; }
+  .d-head .d-dir { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+  .d-meta { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  .tag { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); border: 1px solid var(--border); background: var(--surface-2); border-radius: 4px; padding: 2px 8px; }
+
+  .tail { font-family: var(--font-mono); font-size: 12px; line-height: 1.7; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; height: 230px; overflow-y: auto; white-space: pre-wrap; }
+  .tail .dl { color: var(--text-secondary); }
+  .tail .dl b { color: var(--text-primary); font-weight: 600; }
+  .tail .ml { color: var(--text-primary); }
+  .tail .t { color: #555; }
+
+  table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 12px; }
+  th { text-align: left; color: var(--text-secondary); font-weight: 400; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text-primary); }
+  tr:last-child td { border-bottom: none; }
+  td.num { text-align: right; } th.num { text-align: right; }
+  .exit { padding: 1px 6px; border-radius: 4px; font-size: 11px; border: 1px solid var(--border); color: var(--text-secondary); }
+  .exit.clean { color: var(--success); border-color: rgba(74,222,128,.25); }
+  .exit.timeout, .exit.usage_limit { color: var(--warning); border-color: rgba(251,191,36,.25); }
+  .exit.crash { color: var(--accent); border-color: rgba(224,53,53,.35); }
+  .kind-critic { color: var(--warning); }
+  .diff-ins { color: var(--success); } .diff-del { color: var(--accent); }
+
+  .upd { margin-bottom: 16px; font-size: 13px; line-height: 1.65; }
+  .upd:last-child { margin-bottom: 0; }
+  .upd-d { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); margin-bottom: 2px; }
+
+  .plan { font-size: 13px; line-height: 1.9; }
+  .plan .done { color: var(--text-secondary); text-decoration: line-through; }
+  .plan .box { font-family: var(--font-mono); color: var(--text-secondary); margin-right: 8px; }
+  .plan .box.tick { color: var(--success); }
+
+  /* ---------- Modal ---------- */
+  #modalBg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 10; }
+  #modalBg.on { display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; width: 520px; max-width: 92vw; }
+  .modal h3 { font-size: 20px; font-weight: 600; margin-bottom: 16px; }
+  .frow { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
+  .frow label { font-size: 12px; color: var(--text-secondary); }
+  .frow textarea { min-height: 88px; resize: vertical; font-family: var(--font-ui); }
+  .fgrid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  .dirrow { display: flex; gap: 8px; } .dirrow input { flex: 1; font-family: var(--font-mono); font-size: 12px; }
+  .switch { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); margin-bottom: 16px; }
+  .modal .m-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .contain-warn { display: none; font-size: 12px; color: var(--accent); margin: -8px 0 16px; }
+
+  footer { margin-top: 32px; display: flex; gap: 16px; font-size: 11px; color: #555; font-family: var(--font-mono); }
+  footer a { border: none; color: #555; } footer a:hover { color: var(--text-secondary); }
+  ::-webkit-scrollbar { width: 8px; } ::-webkit-scrollbar-thumb { background: var(--surface-2); border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div id="fatalBanner">
+    <span class="sig">FATAL</span>
+    <div class="msg">Global stop: <b>credit_balance_tripwire</b> in spacestation cycle 41 output. All projects halted. <span>Verify billing state before clearing. 2026-07-23 07:58:12</span></div>
+    <button class="primary" onclick="clearFatal()">Clear FATAL</button>
+  </div>
+
+  <header>
+    <div class="brand">
+      <div class="brand-row">
+        <h1>AUTO<em>PILOT</em></h1>
+        <button id="themeBtn" onclick="toggleTheme()" title="switch theme">light</button>
+      </div>
+      <div class="daemon"><span class="dot" id="daemonDot"></span><span id="daemonTxt">daemon running &middot; pid 18244 &middot; up 3d 06:12</span></div>
+    </div>
+
+    <div class="gauges">
+      <div class="gauge" data-pct="42.1">
+        <div class="g-head"><span class="g-name">five_hour</span><span class="g-pct">42.1%</span></div>
+        <div class="bar"><div class="fill"></div><div class="ceil"></div></div>
+        <div class="g-reset">resets in <span class="cd" data-s="8060"></span></div>
+      </div>
+      <div class="gauge" data-pct="18.0">
+        <div class="g-head"><span class="g-name">seven_day</span><span class="g-pct">18.0%</span></div>
+        <div class="bar"><div class="fill"></div><div class="ceil"></div></div>
+        <div class="g-reset">resets in <span class="cd" data-s="331520"></span></div>
+      </div>
+      <div class="gauge" data-pct="61.4">
+        <div class="g-head"><span class="g-name">seven_day_opus</span><span class="g-pct">61.4%</span></div>
+        <div class="bar"><div class="fill"></div><div class="ceil"></div></div>
+        <div class="g-reset">resets in <span class="cd" data-s="331520"></span></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="ctl-row"><span>ceiling</span><input type="range" id="ceil" min="10" max="100" value="75"><span class="val" id="ceilVal">75%</span></div>
+      <div class="ctl-row"><span>grace</span><input type="number" id="grace" value="30" min="0"> <span>min</span></div>
+      <button id="pauseBtn" onclick="togglePause()">Pause all</button>
+    </div>
+  </header>
+
+  <div class="main">
+    <div>
+      <div class="plist-head">
+        <h2>Projects</h2>
+        <button class="primary" onclick="openModal()">+ Add project</button>
+      </div>
+      <div id="plist"></div>
+    </div>
+
+    <div class="detail" id="detail"></div>
+  </div>
+
+  <footer>
+    <span>demo controls:</span>
+    <a href="#" onclick="tripFatal();return false">trip FATAL</a>
+    <a href="#" onclick="demoOver();return false">go over ceiling</a>
+    <span style="margin-left:auto">autopilot v0.2 mockup &middot; static, no daemon</span>
+  </footer>
+</div>
+
+<div id="modalBg" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <h3>Add project</h3>
+    <div class="frow"><label>Directory</label>
+      <div class="dirrow"><input value="C:/Users/you/" placeholder="project directory"><button>Browse</button></div>
+    </div>
+    <div class="frow"><label>Mission prompt</label>
+      <textarea placeholder="What should cycles work toward? This is the Prime Directive text every cycle reads."></textarea>
+    </div>
+    <div class="fgrid">
+      <div class="frow"><label>Priority</label><input type="number" value="2" min="1"></div>
+      <div class="frow"><label>Model</label><select><option>claude-fable-5</option><option>claude-opus-4-8</option><option>claude-sonnet-5</option></select></div>
+      <div class="frow"><label>Max cycle (min)</label><input type="number" value="120"></div>
+      <div class="frow"><label>Critic ratio</label><input type="number" value="5" min="0" title="every Nth cycle is a critic; 0 = off"></div>
+      <div class="frow"><label>Review gate</label><input type="number" value="0" min="0" title="pause for review after N cycles; 0 = off"></div>
+      <div class="frow"><label>Containment</label><select id="containSel" onchange="document.getElementById('cwarn').style.display=this.value==='off'?'block':'none'"><option>standard</option><option>off</option></select></div>
+    </div>
+    <div class="contain-warn" id="cwarn">Containment off: no guard hook, no deny rules. API key stripping still applies.</div>
+    <div class="m-actions"><button class="ghost" onclick="closeModal()">Cancel</button><button class="primary" onclick="closeModal()">Add &amp; start</button></div>
+  </div>
+</div>
+
+<script>
+const projects = [
+  {
+    id: 'spacestation', name: 'spacestation', prio: 1, status: 'running',
+    statusTxt: 'running cycle 41 (work) &middot; 34m', dir: 'C:/Users/you/Blender/SpaceStations',
+    model: 'claude-fable-5', critic: 5, gate: 0, contain: 'standard', commit: 'abc1234',
+    updates: [
+      ['Jul 23, 08:04', 'Cycle 41, in progress. Blocked out the solar array deployment animation, four unfold stages over 180 frames. Hit a hinge intersecting the truss at frame 120 and fixed it. Next up is the interior corridor kit. Nothing uncertain right now.'],
+      ['Jul 23, 06:12', 'Cycle 40. Finished the docking collar UV fix and re-rendered the affected turntable frames. The seam artifact is gone at render time, verified against the 07-21 output. Started planning the corridor kit before wrapping up.'],
+      ['Jul 22, 23:40', 'Cycle 39. Greeble pass on the hab ring is done, but I ran out of context partway through the writeup, so the WORKLOG for this cycle is thinner than usual. The next critic pass should double-check my density claims against the concept ref.'],
+    ],
+    plan: [
+      { done: true,  t: 'Hab ring exterior greeble pass (density match to concept ref)' },
+      { done: true,  t: 'Fix seam lighting artifact on docking collar UVs' },
+      { done: false, t: 'Solar array deployment animation, keyframe blocking' },
+      { done: false, t: 'Critic finding #12: re-verify render times claimed in WORKLOG 07-21' },
+      { done: false, t: 'Interior corridor kit: 3 modular sections + trim sheet' },
+    ],
+    cycles: [
+      { c: 41, k: 'work',   m: '34.2*', exit: 'running',      tok: '1.1M / 88k', diff: '', commit: '' },
+      { c: 40, k: 'work',   m: '52.8',  exit: 'clean',        tok: '1.4M / 102k', diff: '+410 / -55', commit: 'abc1234' },
+      { c: 39, k: 'work',   m: '61.0',  exit: 'context_full', tok: '1.9M / 121k', diff: '+238 / -12', commit: 'f19d02e' },
+      { c: 38, k: 'critic', m: '22.4',  exit: 'clean',        tok: '0.8M / 34k',  diff: '+18 / -0',  commit: '77ac910' },
+      { c: 37, k: 'work',   m: '120.0', exit: 'timeout',      tok: '2.2M / 143k', diff: '+522 / -301', commit: '31b5c77' },
+      { c: 36, k: 'work',   m: '18.1',  exit: 'usage_limit',  tok: '0.4M / 21k',  diff: '+61 / -4',  commit: '9e0d144' },
+    ],
+    tail: [
+      ['d', '07:45:53', 'cycle 41 start &middot; work &middot; claude-fable-5 &middot; timeout 120m'],
+      ['m', '07:46:31', 'Read PLAN.md, 5 open items. Taking: solar array deployment animation.'],
+      ['m', '07:52:08', 'Blocking keyframes for panel unfold, 4 stages, 180 frames.'],
+      ['m', '08:04:40', 'Checkpoint: saved solar_deploy_v1.blend, PLAN ticked, WORKLOG updated.'],
+      ['d', '08:04:41', 'STOP check: absent. budget five_hour 42.1% (ceiling 75%)'],
+      ['m', '08:09:12', 'Verifying playback at frame 120: hinge intersects truss. Fixing.'],
+    ],
+  },
+  {
+    id: 'dante-warehouse', name: 'dante-warehouse', prio: 2, status: 'queued',
+    statusTxt: 'queued &middot; next after spacestation', dir: 'C:/Users/you/Dante',
+    model: 'claude-fable-5', critic: 4, gate: 0, contain: 'standard', commit: '20cf881',
+    updates: [
+      ['Jul 23, 06:58', 'Cycle 17. Profiled null rates on orders.customer_ref: 4.2% overall, but concentrated in pre-2024 rows, which looks like a migration artifact rather than an ongoing data quality problem. Wrote it up in the glossary. Next is backfilling terms for the revenue views.'],
+    ],
+    plan: [
+      { done: true,  t: 'Profile null rates on orders.customer_ref' },
+      { done: false, t: 'Backfill glossary terms for revenue views' },
+      { done: false, t: 'Nightly report template: exec summary section' },
+    ],
+    cycles: [
+      { c: 17, k: 'work', m: '41.3', exit: 'clean', tok: '1.0M / 76k', diff: '+188 / -23', commit: '20cf881' },
+      { c: 16, k: 'critic', m: '19.8', exit: 'clean', tok: '0.6M / 28k', diff: '+9 / -0', commit: '5d11a09' },
+    ],
+    tail: [
+      ['d', '06:58:02', 'cycle 17 end &middot; clean &middot; 41.3m &middot; +188/-23 &middot; commit 20cf881'],
+      ['d', '06:58:02', 'queued behind spacestation (priority 1 > 2)'],
+    ],
+  },
+  {
+    id: 'blender-assets', name: 'blender-assets', prio: 2, status: 'review',
+    statusTxt: 'awaiting-review &middot; 8 cycles since last review', dir: 'C:/Users/you/Blender/AssetLib',
+    model: 'claude-sonnet-5', critic: 5, gate: 8, contain: 'standard', commit: 'e42d90b',
+    updates: [
+      ['Jul 23, 02:14', 'Cycle 24. Kitbash set 03 is complete: 24 pieces, named collections, thumbnails regenerated for the catalog. This hits the review gate, so I am pausing here. Please check the catalog renders before I start set 04.'],
+    ],
+    plan: [
+      { done: true, t: 'Kitbash set 03: 24 pieces, collections named' },
+      { done: true, t: 'Thumbnail renders regenerated for catalog' },
+      { done: false, t: 'Await human review before set 04' },
+    ],
+    cycles: [
+      { c: 24, k: 'work', m: '38.9', exit: 'clean', tok: '0.9M / 64k', diff: '+301 / -87', commit: 'e42d90b' },
+      { c: 23, k: 'work', m: '44.1', exit: 'clean', tok: '1.1M / 71k', diff: '+256 / -40', commit: '8fa2c31' },
+    ],
+    tail: [
+      ['d', '02:14:37', 'cycle 24 end &middot; clean &middot; 38.9m &middot; commit e42d90b'],
+      ['d', '02:14:37', 'review gate: 8/8 cycles reached, pausing (awaiting-review)'],
+    ],
+  },
+  {
+    id: 'notes-site', name: 'notes-site', prio: 3, status: 'stopped',
+    statusTxt: 'stopped &middot; by user 07-21 19:40', dir: 'C:/Users/you/notes-site',
+    model: 'claude-sonnet-5', critic: 0, gate: 0, contain: 'off', commit: 'b7710e2',
+    updates: [
+      ['Jul 21, 19:32', 'Cycle 3. Drafted the plan for migrating posts to a markdown source tree but did not start it; the project was stopped before I began.'],
+    ],
+    plan: [ { done: false, t: 'Migrate posts to markdown source tree' } ],
+    cycles: [ { c: 3, k: 'work', m: '27.0', exit: 'clean', tok: '0.5M / 31k', diff: '+94 / -12', commit: 'b7710e2' } ],
+    tail: [ ['d', '19:40:11', 'STOP file detected, project stopped'] ],
+  },
+];
+
+const chipCls = { running: 'running', queued: '', sleeping: '', review: 'review', stopped: '', fatal: 'fatal' };
+const chipTxt = { running: 'running', queued: 'queued', sleeping: 'sleeping', review: 'awaiting-review', stopped: 'stopped', fatal: 'fatal' };
+let sel = 'spacestation';
+
+function actionsFor(p) {
+  if (p.status === 'running') return '<button onclick="event.stopPropagation()">Pause</button><button onclick="event.stopPropagation()">Stop</button>';
+  if (p.status === 'review')  return '<button class="primary" onclick="event.stopPropagation();reviewed(\'' + p.id + '\')">Reviewed</button><button onclick="event.stopPropagation()">Stop</button>';
+  if (p.status === 'stopped') return '<button onclick="event.stopPropagation();restart(\'' + p.id + '\')">Start</button>';
+  return '<button onclick="event.stopPropagation()">Pause</button><button onclick="event.stopPropagation()">Stop</button>';
+}
+
+function renderList() {
+  document.getElementById('plist').innerHTML = projects.map(p => `
+    <div class="proj ${p.id === sel ? 'sel' : ''}" onclick="select('${p.id}')">
+      <div class="p-top"><span class="drag">::</span><span class="p-name">${p.name}</span><span class="prio">P${p.prio}</span></div>
+      <div class="p-status"><span class="chip ${chipCls[p.status]}">${chipTxt[p.status]}</span><span>${p.statusTxt}</span></div>
+      <div class="p-actions">${actionsFor(p)}</div>
+      <div class="p-links"><a href="#" onclick="event.stopPropagation();return false">open dir</a><a href="#" onclick="event.stopPropagation();return false">latest diff ${p.commit}</a></div>
+    </div>`).join('');
+}
+
+function renderDetail() {
+  const p = projects.find(x => x.id === sel);
+  document.getElementById('detail').innerHTML = `
+    <div class="card d-head">
+      <span class="d-name">${p.name}</span>
+      <span class="d-dir">${p.dir}</span>
+      <span class="d-meta">
+        <span class="tag">${p.model}</span>
+        <span class="tag">critic 1:${p.critic || 'off'}</span>
+        <span class="tag">gate ${p.gate || 'off'}</span>
+        <span class="tag" ${p.contain === 'off' ? 'style="color:var(--accent);border-color:rgba(224,53,53,.35)"' : ''}>containment ${p.contain}</span>
+      </span>
+    </div>
+    <div class="card">
+      <h3>Updates <span class="sub">UPDATES.md &middot; read-only</span></h3>
+      ${p.updates.map(u => `<div class="upd"><div class="upd-d">${u[0]}</div><div>${u[1]}</div></div>`).join('')}
+    </div>
+    <div class="card">
+      <h3>Activity <span class="sub">ACTIVITY.log &middot; live tail</span></h3>
+      <div class="tail" id="tail">${p.tail.map(tailLine).join('')}</div>
+    </div>
+    <div class="card">
+      <h3>Cycle history <span class="sub">.autopilot/events.jsonl</span></h3>
+      <table>
+        <tr><th class="num">cycle</th><th>kind</th><th class="num">min</th><th>exit</th><th class="num">tokens in/out</th><th class="num">diff</th><th>commit</th></tr>
+        ${p.cycles.map(c => `<tr>
+          <td class="num">${c.c}</td>
+          <td class="${c.k === 'critic' ? 'kind-critic' : ''}">${c.k}</td>
+          <td class="num">${c.m}</td>
+          <td><span class="exit ${c.exit}">${c.exit}</span></td>
+          <td class="num">${c.tok}</td>
+          <td class="num">${c.diff ? '<span class="diff-ins">' + c.diff.split(' / ')[0] + '</span> / <span class="diff-del">' + c.diff.split(' / ')[1] + '</span>' : ''}</td>
+          <td>${c.commit ? '<a href="#" onclick="return false">' + c.commit + '</a>' : ''}</td>
+        </tr>`).join('')}
+      </table>
+    </div>
+    <div class="card">
+      <h3>Plan <span class="sub">PLAN.md &middot; read-only</span></h3>
+      <div class="plan">${p.plan.map(i => `<div class="${i.done ? 'done' : ''}"><span class="box ${i.done ? 'tick' : ''}">[${i.done ? 'x' : ' '}]</span>${i.t}</div>`).join('')}</div>
+    </div>`;
+  const t = document.getElementById('tail'); t.scrollTop = t.scrollHeight;
+}
+
+function tailLine(l) {
+  const [kind, time, msg] = l;
+  return kind === 'd'
+    ? `<div class="dl"><span class="t">${time}</span> [daemon] <b></b>${msg}</div>`
+    : `<div class="ml"><span class="t">${time}</span> ${msg}</div>`;
+}
+
+function select(id) { sel = id; renderList(); renderDetail(); }
+function reviewed(id) { const p = projects.find(x => x.id === id); p.status = 'queued'; p.statusTxt = 'queued &middot; review cleared, gate reset 0/8'; p.tail.push(['d', now(), 'review cleared by user, gate reset']); renderList(); renderDetail(); }
+function restart(id) { const p = projects.find(x => x.id === id); p.status = 'queued'; p.statusTxt = 'queued'; p.tail.push(['d', now(), 'STOP cleared, project enabled']); renderList(); renderDetail(); }
+function now() { const d = new Date(); return d.toTimeString().slice(0, 8); }
+
+/* gauges */
+function paintGauges() {
+  const ceil = +document.getElementById('ceil').value;
+  document.getElementById('ceilVal').textContent = ceil + '%';
+  document.querySelectorAll('.gauge').forEach(g => {
+    const pct = +g.dataset.pct;
+    const fill = g.querySelector('.fill'), label = g.querySelector('.g-pct');
+    fill.style.width = Math.min(pct, 100) + '%';
+    g.querySelector('.ceil').style.left = ceil + '%';
+    fill.className = 'fill'; label.className = 'g-pct';
+    if (pct >= ceil) { fill.classList.add('over'); label.classList.add('over'); }
+    else if (pct >= ceil - 10) { fill.classList.add('warn'); label.classList.add('warn'); }
+    label.textContent = pct.toFixed(1) + '%';
+  });
+}
+document.getElementById('ceil').addEventListener('input', paintGauges);
+
+/* countdowns */
+function tickCd() {
+  document.querySelectorAll('.cd').forEach(el => {
+    let s = +el.dataset.s - 1; el.dataset.s = s;
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+    el.textContent = h > 24 ? Math.floor(h / 24) + 'd ' + (h % 24) + 'h' : h + 'h ' + String(m).padStart(2, '0') + 'm ' + String(sec).padStart(2, '0') + 's';
+  });
+}
+setInterval(tickCd, 1000);
+
+/* fake live tail for the running project */
+const feed = [
+  ['m', 'Hinge fixed, re-verified playback frames 1-180, no intersection.'],
+  ['d', 'STOP check: absent. budget five_hour 42.3% (ceiling 75%)'],
+  ['m', 'Checkpoint: solar_deploy_v2.blend saved, WORKLOG line appended.'],
+  ['m', 'Next PLAN item: interior corridor kit, blocking section A.'],
+  ['d', 'auto-commit staged: 3 files changed'],
+  ['m', 'Trim sheet UV layout at 2048, packing test render queued.'],
+];
+let fi = 0;
+setInterval(() => {
+  const p = projects.find(x => x.status === 'running');
+  if (!p) return;
+  const [k, msg] = feed[fi++ % feed.length];
+  p.tail.push([k, now(), msg]);
+  if (p.tail.length > 40) p.tail.shift();
+  if (sel === p.id) {
+    const t = document.getElementById('tail');
+    if (t) { t.insertAdjacentHTML('beforeend', tailLine([k, now(), msg])); t.scrollTop = t.scrollHeight; }
+  }
+}, 4000);
+
+/* global pause */
+let paused = false;
+function togglePause() {
+  paused = !paused;
+  const b = document.getElementById('pauseBtn'), dot = document.getElementById('daemonDot');
+  b.textContent = paused ? 'Resume all' : 'Pause all';
+  b.classList.toggle('paused', paused);
+  dot.classList.toggle('paused', paused);
+  document.getElementById('daemonTxt').textContent = paused ? 'daemon running · PAUSED by user' : 'daemon running · pid 18244 · up 3d 06:12';
+}
+
+/* demo: fatal */
+function tripFatal() {
+  document.getElementById('fatalBanner').classList.add('on');
+  document.getElementById('daemonDot').classList.add('fatal');
+  projects.forEach(p => { if (p.status === 'running' || p.status === 'queued') { p.status = 'fatal'; p.statusTxt = 'halted &middot; global FATAL'; } });
+  renderList(); renderDetail();
+}
+function clearFatal() {
+  document.getElementById('fatalBanner').classList.remove('on');
+  document.getElementById('daemonDot').classList.remove('fatal');
+  projects[0].status = 'running'; projects[0].statusTxt = 'running cycle 41 (work) · 34m';
+  projects[1].status = 'queued'; projects[1].statusTxt = 'queued · next after spacestation';
+  renderList(); renderDetail();
+}
+function demoOver() {
+  const g = document.querySelector('.gauge'); g.dataset.pct = 81.6; paintGauges();
+  const p = projects[0];
+  p.status = 'sleeping'; p.statusTxt = 'sleeping until 12:59 &middot; ceiling';
+  p.tail.push(['d', now(), 'five_hour 81.6% over ceiling 75%, sleeping until reset 12:59']);
+  projects[1].statusTxt = 'queued · budget sleeping';
+  renderList(); renderDetail();
+}
+
+/* theme */
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  document.getElementById('themeBtn').textContent = t === 'light' ? 'dark' : 'light';
+}
+function toggleTheme() {
+  const t = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  try { localStorage.setItem('ap-theme', t); } catch (e) {}
+  applyTheme(t);
+}
+try { applyTheme(localStorage.getItem('ap-theme') || 'dark'); } catch (e) { applyTheme('dark'); }
+
+/* modal */
+function openModal() { document.getElementById('modalBg').classList.add('on'); }
+function closeModal() { document.getElementById('modalBg').classList.remove('on'); }
+
+renderList(); renderDetail(); paintGauges(); tickCd();
+</script>
+</body>
+</html>
