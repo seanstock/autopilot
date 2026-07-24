@@ -1,6 +1,6 @@
 {
   "name": "autopilot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Local-first token furnace: one daemon running autonomous Claude Code cycles against registered projects, governed by a global usage budget, observable from a localhost UI.",
   "bin": {
