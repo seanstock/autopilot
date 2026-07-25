@@ -29,9 +29,10 @@ const containment = require('./containment');
 const USAGE_LIMIT_RE = /usage limit|rate limit|hit your limit|out of extended usage/i;
 const CONTEXT_FULL_RE = /context window|prompt is too long|context low|ran out of context/i;
 
-// Valid claude --effort levels; an out-of-set project.effort is ignored
-// (the CLI default applies) rather than passed through blindly.
-const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+// Valid claude --effort levels (shared via util so state's config
+// validation and this spawn-arg guard cannot disagree); an out-of-set
+// project.effort is ignored (CLI default applies) rather than passed blindly.
+const EFFORT_LEVELS = util.EFFORT_LEVELS;
 
 // A cycle that errors out this fast with no structured result line reads as
 // a crash (bad flags, missing binary, immediate CLI failure) rather than a

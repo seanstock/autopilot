@@ -177,10 +177,10 @@ const EDITABLE_KEYS = [
 ];
 
 const NUMERIC_KEYS = new Set(['priority', 'maxCycleMinutes', 'criticRatio', 'reviewGateCycles']);
-// claude --effort levels (code.claude.com/docs/en/model-config). max is
-// accepted here because Autopilot passes effort via the `--effort` CLI
+// claude --effort levels (shared via util so state + runner never drift).
+// max is accepted because Autopilot passes effort via the `--effort` CLI
 // flag, not the settings file (settings-file effortLevel forbids max).
-const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const EFFORT_LEVELS = util.EFFORT_LEVELS;
 // A model id is a safe-charset token. Validating it (rather than storing
 // the request body verbatim) closes the same stored-XSS hole the I6 fix
 // closed for the numeric fields: model renders straight into the UI DOM.

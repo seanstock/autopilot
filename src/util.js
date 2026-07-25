@@ -88,6 +88,11 @@ function projectMeta(dir) {
   return path.join(dir, '.autopilot');
 }
 
+// Valid `claude --effort` reasoning levels (code.claude.com/docs/en/
+// model-config). Shared here so state (config validation) and runner
+// (spawn-arg guard) cannot drift out of agreement.
+const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
 module.exports = {
   get AUTOPILOT_HOME() {
     return resolveAutopilotHome();
@@ -99,4 +104,5 @@ module.exports = {
   writeJson,
   log,
   projectMeta,
+  EFFORT_LEVELS,
 };

@@ -379,7 +379,7 @@ function startServer({ scheduler, port }) {
     if (m && method === 'POST') {
       const body = await readJsonBody(req);
       const ok = scheduler.updateProject(m[1], body);
-      if (!ok) return sendJson(res, 400, { error: 'unknown project or empty patch' });
+      if (!ok) return sendJson(res, 400, { error: 'unknown project' });
       return sendJson(res, 200, scheduler.snapshot());
     }
 
