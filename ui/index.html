@@ -273,9 +273,9 @@
       </div>
       <div class="fgrid">
         <div class="frow"><label>Priority</label><input type="number" id="f-priority" value="2" min="1"></div>
-        <div class="frow"><label>Model</label><select id="f-model"><option>claude-fable-5</option><option>claude-opus-4-8</option><option selected>claude-sonnet-5</option><option>claude-haiku-4-5</option></select></div>
+        <div class="frow"><label>Model</label><select id="f-model"><option>claude-opus-5</option><option>claude-fable-5</option><option>claude-opus-4-8</option><option selected>claude-sonnet-5</option><option>claude-haiku-4-5</option></select></div>
         <div class="frow"><label>Effort</label><select id="f-effort"><option value="">default</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
-        <div class="frow"><label>Worker model</label><select id="f-worker"><option value="">none (not orchestrated)</option><option>claude-fable-5</option><option>claude-opus-4-8</option><option>claude-sonnet-5</option><option>claude-haiku-4-5</option></select></div>
+        <div class="frow"><label>Worker model</label><select id="f-worker"><option value="">none (not orchestrated)</option><option>claude-opus-5</option><option>claude-fable-5</option><option>claude-opus-4-8</option><option>claude-sonnet-5</option><option>claude-haiku-4-5</option></select></div>
         <div class="frow"><label>Worker effort</label><select id="f-worker-effort"><option value="">inherit</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
         <div class="frow"><label>Max cycle (min)</label><input type="number" id="f-maxCycle" value="120"></div>
         <div class="frow"><label>Critic ratio</label><input type="number" id="f-critic" value="5" min="0" title="every Nth cycle is a critic; 0 = off"></div>
@@ -747,7 +747,7 @@ function renderTailLine(raw) {
   return `<div class="${cls}"><span class="t">${escapeHtml(timeShort(iso))}</span> ${label}${escapeHtml(msg)}</div>`;
 }
 
-const MODEL_OPTS = ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'];
+const MODEL_OPTS = ['claude-opus-5', 'claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'];
 const EFFORT_OPTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 function optionList(values, current, blankLabel) {
