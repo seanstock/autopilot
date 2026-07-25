@@ -67,6 +67,19 @@ function injectFilePath(dir) {
   return path.join(util.projectMeta(dir), 'INJECT.md');
 }
 
+// Compact "key=value, key=value" summary of a config patch for the
+// human-readable ACTIVITY line. Values are model ids / effort levels /
+// small numbers, never secrets.
+function summarizePatch(patch) {
+  if (!patch || typeof patch !== 'object') return '(none)';
+  const parts = [];
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined) continue;
+    parts.push(`${k}=${v === '' || v === null ? '(cleared)' : v}`);
+  }
+  return parts.length ? parts.join(', ') : '(none)';
+}
+
 // Token/model/cost accounting. Durable running totals live in each
 // project's runtime state.json (rotation-proof; events.jsonl is capped),
 // accumulated per cycle_end and seeded once by backfill from whatever
@@ -620,12 +633,19 @@ class Scheduler extends EventEmitter {
       util.log('scheduler: appendEvent cycle_start failed', String(err && err.message));
     }
 
-    // Effective model routing (docs/plans Task S): a work cycle carrying an
-    // order runs against workerModel, not project.model - the scheduler
-    // passes `{...project, model: effectiveModel}` down, so everything
-    // downstream (the runner's spawn, and this function's own totals/
-    // cycle_end stamping) sees the model actually used for the cycle.
-    const cycleProject = order ? Object.assign({}, project, { model: effectiveModel }) : project;
+    // Effective model + effort routing (docs/plans Task S): a work cycle
+    // carrying an order runs against workerModel, not project.model - the
+    // scheduler passes `{...project, model: effectiveModel}` down, so
+    // everything downstream (the runner's spawn, and this function's own
+    // totals/cycle_end stamping) sees the model actually used. Effort
+    // follows the same rule: a worker uses workerEffort when set, else it
+    // inherits the project's effort; orchestrate/critic/plain-work cycles
+    // keep project.effort unchanged.
+    let cycleProject = project;
+    if (order) {
+      const workerEffort = project.workerEffort || project.effort;
+      cycleProject = Object.assign({}, project, { model: effectiveModel, effort: workerEffort });
+    }
 
     let result;
     try {
@@ -1054,6 +1074,24 @@ class Scheduler extends EventEmitter {
     if (!Number.isFinite(num)) return false;
     project.priority = num;
     state.save(this.stateObj);
+    this._emitStatusIfChanged();
+    return true;
+  }
+
+  // Apply a validated config patch to a project (model, workerModel,
+  // effort, workerEffort, verifyCmd, criticRatio, etc. - see
+  // state.updateProject's EDITABLE_KEYS). Takes effect on the NEXT cycle:
+  // an in-flight cycle already spawned with the old model/effort runs to
+  // completion. Returns false for an unknown project.
+  updateProject(id, patch) {
+    const updated = state.updateProject(this.stateObj, id, patch);
+    if (!updated) return false;
+    state.save(this.stateObj);
+    try {
+      events.activity(updated.dir, `config updated (applies next cycle): ${summarizePatch(patch)}`, 'daemon');
+    } catch (err) {
+      // best effort
+    }
     this._emitStatusIfChanged();
     return true;
   }

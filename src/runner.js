@@ -29,6 +29,10 @@ const containment = require('./containment');
 const USAGE_LIMIT_RE = /usage limit|rate limit|hit your limit|out of extended usage/i;
 const CONTEXT_FULL_RE = /context window|prompt is too long|context low|ran out of context/i;
 
+// Valid claude --effort levels; an out-of-set project.effort is ignored
+// (the CLI default applies) rather than passed through blindly.
+const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
 // A cycle that errors out this fast with no structured result line reads as
 // a crash (bad flags, missing binary, immediate CLI failure) rather than a
 // real work attempt that happened to fail.
@@ -417,18 +421,25 @@ async function runCycle(opts) {
 
   const cmd = opts.claudeCmd && opts.claudeCmd.length ? opts.claudeCmd : defaultClaudeCmd();
   const bin = cmd[0];
-  const args = cmd.slice(1).concat([
-    '-p',
-    '--model',
-    project.model,
+  const args = cmd.slice(1).concat(['-p', '--model', project.model]);
+  // Reasoning effort (code.claude.com/docs/en/model-config): passed via the
+  // --effort CLI flag so it can differ per cycle (the scheduler routes the
+  // orchestrator's effort to orchestrate cycles and workerEffort to worker
+  // cycles by swapping project.effort). Omitted entirely when unset, so the
+  // CLI default (high on current models) applies. Validated against the
+  // known level set to keep an unexpected value from reaching the CLI.
+  if (EFFORT_LEVELS.has(project.effort)) {
+    args.push('--effort', project.effort);
+  }
+  args.push(
     '--permission-mode',
     'acceptEdits',
     '--settings',
     effectiveSettingsPath,
     '--output-format',
     'stream-json',
-    '--verbose',
-  ]);
+    '--verbose'
+  );
 
   const env = Object.assign({}, process.env);
   delete env.ANTHROPIC_API_KEY;

@@ -295,6 +295,10 @@ async function cmdAdd(args) {
   const cfg = { dir: absDir, prompt };
   if (args.priority !== undefined) cfg.priority = Number(args.priority);
   if (args.model !== undefined) cfg.model = args.model;
+  if (args.effort !== undefined) cfg.effort = args.effort;
+  if (args.worker !== undefined) cfg.workerModel = args.worker;
+  if (args['worker-effort'] !== undefined) cfg.workerEffort = args['worker-effort'];
+  if (args.verify !== undefined) cfg.verifyCmd = args.verify;
   if (args.critic !== undefined) cfg.criticRatio = Number(args.critic);
   if (args.gate !== undefined) cfg.reviewGateCycles = Number(args.gate);
   if (args.containment !== undefined) cfg.containment = args.containment;
@@ -366,6 +370,40 @@ async function cmdInject(id, text) {
   const existing = fs.existsSync(p) ? String(fs.readFileSync(p, 'utf8')).replace(/\s+$/, '') + '\n\n' : '';
   fs.writeFileSync(p, existing + text.trim() + '\n');
   console.log(`daemon down - queued in ${p}`);
+}
+
+// Edit an existing project's config (model, effort, worker model/effort,
+// verify command, critic/gate). Takes effect on the project's next cycle.
+async function cmdConfig(id, args) {
+  const patch = {};
+  if (args.model !== undefined) patch.model = args.model;
+  if (args.effort !== undefined) patch.effort = args.effort;
+  if (args.worker !== undefined) patch.workerModel = args.worker;
+  if (args['worker-effort'] !== undefined) patch.workerEffort = args['worker-effort'];
+  if (args.verify !== undefined) patch.verifyCmd = args.verify;
+  if (args.critic !== undefined) patch.criticRatio = Number(args.critic);
+  if (args.gate !== undefined) patch.reviewGateCycles = Number(args.gate);
+  if (!id || Object.keys(patch).length === 0) {
+    console.error('usage: autopilot config <id> [--model m] [--effort low|medium|high|xhigh|max] [--worker m] [--worker-effort e] [--verify "cmd"] [--critic n] [--gate n]');
+    console.error('  (clear a field by passing an empty value, e.g. --worker "")');
+    process.exitCode = 1;
+    return;
+  }
+  const port = getPort();
+  if (await isDaemonUp(port)) {
+    await httpJson('POST', `/api/projects/${encodeURIComponent(id)}/config`, port, patch);
+    console.log(`updated ${id} (applies next cycle): ${Object.keys(patch).join(', ')}`);
+    return;
+  }
+  const stateObj = state.load();
+  const updated = state.updateProject(stateObj, id, patch);
+  if (!updated) {
+    console.error(`autopilot: unknown project: ${id}`);
+    process.exitCode = 1;
+    return;
+  }
+  state.save(stateObj);
+  console.log(`updated ${id} (daemon down, wrote projects.json directly)`);
 }
 
 async function cmdStop(id) {
@@ -517,12 +555,15 @@ async function main() {
     case 'inject':
       await cmdInject(args._[0], args._.slice(1).join(' '));
       break;
+    case 'config':
+      await cmdConfig(args._[0], args);
+      break;
     case 'boot':
       cmdBoot(args._[0]);
       break;
     default:
       console.error(`autopilot: unknown command: ${cmd}`);
-      console.error('usage: autopilot [add <dir>|list|stop [id]|logs <id>|inject <id> <text>|boot on|off|daemon]');
+      console.error('usage: autopilot [add <dir>|list|stop [id]|logs <id>|inject <id> <text>|config <id> --model/--effort/...|boot on|off|daemon]');
       process.exitCode = 1;
   }
 }

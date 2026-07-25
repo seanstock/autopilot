@@ -55,11 +55,21 @@ ONLY OS-level scheduling in the system.
   "containment": "standard",
   "mcp": ["blender"],
   "verifyCmd": "npm test",
-  "workerModel": "claude-sonnet-5"
+  "workerModel": "claude-sonnet-5",
+  "effort": "high",
+  "workerEffort": "medium"
 }
 ```
 `verifyCmd` and `workerModel` are optional; `workerModel`'s presence
-enables orchestration (see Orchestration below).
+enables orchestration (see Orchestration below). `model` is the
+orchestrator/main model, `workerModel` the executor. `effort` is the
+reasoning level (`low|medium|high|xhigh|max`, passed to `claude --effort`;
+absent = CLI default) applied to the main/orchestrator model; optional
+`workerEffort` overrides it for worker cycles (absent = inherit `effort`).
+Any of these can be edited on a live project via the UI's Config card,
+`POST /api/projects/:id/config` (a validated partial patch; empty value
+clears an optional field), or `autopilot config <id> --model/--effort/...`;
+edits take effect on the project's next cycle.
 `mcp` lists the MCP server names the project's cycles may use (allowed as
 `mcp__<name>` in the generated settings; the servers themselves come from
 the user's own Claude Code config).
@@ -304,6 +314,7 @@ autopilot list             projects + status, one line each
 autopilot stop [id]        stop one project, or the daemon with no id
 autopilot logs <id>        tail ACTIVITY.log
 autopilot inject <id> <t>  queue a user directive for the next work cycle
+autopilot config <id> ...   edit model/effort/worker/verify on a live project
 autopilot boot on|off      register/unregister daemon autostart with the OS
 ```
 `autopilot stop` must also work by hand with the daemon dead: document that

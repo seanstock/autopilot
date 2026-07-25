@@ -425,6 +425,66 @@ test('token/cost totals accumulate per model, stamp cycle_end, and reach the sna
   assert.equal(snap.totals.in, runtime.totals.in, 'global totals sum project totals');
 });
 
+test('worker cycle routes workerModel + workerEffort (inherits effort when workerEffort unset)', async () => {
+  const project = makeProject({ model: 'claude-opus-4-8', effort: 'high', workerModel: 'claude-sonnet-5' });
+  const stateObj = makeStateObj([project]);
+  const ordersDir = path.join(project.dir, 'orders');
+  fs.mkdirSync(ordersDir, { recursive: true });
+  fs.writeFileSync(path.join(ordersDir, '001-a.md'), '# A\nstatus: open\n');
+
+  const seen = [];
+  const runCycleImpl = async ({ project: cp, kind, order }) => {
+    seen.push({ kind, model: cp.model, effort: cp.effort, order: order && order.id });
+    if (order) { try { fs.unlinkSync(path.join(ordersDir, '001-a.md')); } catch (e) {} } // let it finish
+    return cleanResult();
+  };
+
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => seen.some((s) => s.kind === 'work'));
+  await sched.stopDaemon();
+
+  const worker = seen.find((s) => s.kind === 'work');
+  assert.equal(worker.model, 'claude-sonnet-5', 'worker runs on workerModel');
+  assert.equal(worker.effort, 'high', 'worker inherits project.effort when workerEffort is unset');
+});
+
+test('worker cycle uses workerEffort override when set', async () => {
+  const project = makeProject({ model: 'claude-opus-4-8', effort: 'high', workerModel: 'claude-sonnet-5', workerEffort: 'low' });
+  const stateObj = makeStateObj([project]);
+  const ordersDir = path.join(project.dir, 'orders');
+  fs.mkdirSync(ordersDir, { recursive: true });
+  fs.writeFileSync(path.join(ordersDir, '001-a.md'), '# A\nstatus: open\n');
+
+  let workerEffort = null;
+  const runCycleImpl = async ({ project: cp, order }) => {
+    if (order) { workerEffort = cp.effort; try { fs.unlinkSync(path.join(ordersDir, '001-a.md')); } catch (e) {} }
+    return cleanResult();
+  };
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => workerEffort !== null);
+  await sched.stopDaemon();
+  assert.equal(workerEffort, 'low');
+});
+
+test('updateProject command validates, persists, and applies to the next cycle', async () => {
+  const project = makeProject({ model: 'claude-sonnet-5' });
+  const stateObj = makeStateObj([project]);
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl: async () => cleanResult(), notifyImpl: () => {}, tickMs: 999999 });
+
+  assert.equal(sched.updateProject('nope', { model: 'x' }), false, 'unknown project -> false');
+  assert.equal(sched.updateProject(project.id, { model: 'claude-opus-4-8', effort: 'xhigh' }), true);
+
+  // persisted to projects.json and reflected in the snapshot
+  const reloaded = state.getProject(state.load(), project.id);
+  assert.equal(reloaded.model, 'claude-opus-4-8');
+  assert.equal(reloaded.effort, 'xhigh');
+  const snap = sched.snapshot();
+  assert.equal(snap.projects[0].model, 'claude-opus-4-8');
+  assert.equal(snap.projects[0].effort, 'xhigh');
+});
+
 test('stuck order: same order re-dispatched at most 3 times, then a grooming orchestrate cycle (I1)', async () => {
   const project = makeProject({ workerModel: 'claude-sonnet-5', criticRatio: 0 });
   const stateObj = makeStateObj([project]);

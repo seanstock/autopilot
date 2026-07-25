@@ -53,6 +53,10 @@ function makeFakeScheduler(projects) {
   sched.addInjection = record('addInjection');
   sched.getInjection = (id) => (id === 'proj1' ? 'queued directive text' : null);
   sched.clearInjection = record('clearInjection');
+  sched.updateProject = (id, patch) => {
+    sched.calls.push(['updateProject', id, patch]);
+    return id === 'proj1';
+  };
   sched.stopDaemon = async () => {};
   return sched;
 }
@@ -172,6 +176,24 @@ test('POST /api/projects/:id/stop, /reviewed, /priority and global pause/resume/
     assert.deepEqual(prioCall, ['setPriority', 'proj1', 3]);
   });
 
+});
+
+test('POST /api/projects/:id/config dispatches updateProject; unknown project -> 400', async () => {
+  const sched = makeFakeScheduler([{ id: 'proj1', dir: process.cwd() }]);
+  await withServer(sched, async (port) => {
+    const ok = await requestRaw(port, 'POST', '/api/projects/proj1/config', {
+      host: `127.0.0.1:${port}`, body: { model: 'claude-opus-4-8', effort: 'xhigh' }
+    });
+    assert.equal(ok.status, 200);
+    assert.ok(ok.body.daemon, 'returns the status snapshot');
+    const call = sched.calls.find((c) => c[0] === 'updateProject');
+    assert.deepEqual(call, ['updateProject', 'proj1', { model: 'claude-opus-4-8', effort: 'xhigh' }]);
+
+    const bad = await requestRaw(port, 'POST', '/api/projects/nope/config', {
+      host: `127.0.0.1:${port}`, body: { model: 'x' }
+    });
+    assert.equal(bad.status, 400);
+  });
 });
 
 test('inject endpoints: POST queues, GET reads, unknown id 404s, DELETE clears', async () => {

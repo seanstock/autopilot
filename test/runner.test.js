@@ -219,6 +219,29 @@ test('worker cycle with an order does NOT consume INJECT.md', async () => {
   assert.equal(fs.existsSync(path.join(meta, 'INJECT.md')), true);
 });
 
+test('project.effort adds --effort to the spawn args; absent omits it', async () => {
+  const dir1 = tempProjectRepo();
+  await withFakeMode('clean', () =>
+    runCycle({ project: baseProject(dir1, { effort: 'xhigh' }), kind: 'work', cycleNumber: 1, budget: mockBudget(), claudeCmd: fakeCmd(), order: null })
+  );
+  const argv1 = (JSON.parse(fs.readFileSync(path.join(dir1, 'env_seen.json'), 'utf8')).argv || []).join(' ');
+  assert.match(argv1, /--effort xhigh/, 'effort passed through to the CLI');
+
+  const dir2 = tempProjectRepo();
+  await withFakeMode('clean', () =>
+    runCycle({ project: baseProject(dir2), kind: 'work', cycleNumber: 1, budget: mockBudget(), claudeCmd: fakeCmd(), order: null })
+  );
+  const argv2 = (JSON.parse(fs.readFileSync(path.join(dir2, 'env_seen.json'), 'utf8')).argv || []).join(' ');
+  assert.doesNotMatch(argv2, /--effort/, 'no effort flag when unset (CLI default applies)');
+
+  const dir3 = tempProjectRepo();
+  await withFakeMode('clean', () =>
+    runCycle({ project: baseProject(dir3, { effort: 'bogus' }), kind: 'work', cycleNumber: 1, budget: mockBudget(), claudeCmd: fakeCmd(), order: null })
+  );
+  const argv3 = (JSON.parse(fs.readFileSync(path.join(dir3, 'env_seen.json'), 'utf8')).argv || []).join(' ');
+  assert.doesNotMatch(argv3, /--effort/, 'invalid effort level is not passed to the CLI');
+});
+
 test('critic in a plain (non-orchestrated) project gets base settings, no Task (I2)', async () => {
   const dir = tempProjectRepo();
   const project = baseProject(dir); // no workerModel

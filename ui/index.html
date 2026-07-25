@@ -188,6 +188,13 @@
   .inv-cost { font-family: var(--font-mono); font-size: 22px; font-weight: 600; line-height: 1; }
   .inv-tok { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
 
+  /* ---------- config card ---------- */
+  .cfg-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px 16px; }
+  .cfg-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-secondary); }
+  .cfg-grid select, .cfg-grid input { font-size: 13px; }
+  .cfg-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+  .cfg-note { flex: 1; font-size: 11px; color: var(--text-secondary); }
+
   /* ---------- inject card ---------- */
   #injText { width: 100%; resize: vertical; min-height: 60px; }
   .inj-actions { display: flex; justify-content: flex-end; margin-top: 8px; gap: 8px; }
@@ -266,7 +273,10 @@
       </div>
       <div class="fgrid">
         <div class="frow"><label>Priority</label><input type="number" id="f-priority" value="2" min="1"></div>
-        <div class="frow"><label>Model</label><select id="f-model"><option>claude-fable-5</option><option>claude-opus-4-8</option><option selected>claude-sonnet-5</option></select></div>
+        <div class="frow"><label>Model</label><select id="f-model"><option>claude-fable-5</option><option>claude-opus-4-8</option><option selected>claude-sonnet-5</option><option>claude-haiku-4-5</option></select></div>
+        <div class="frow"><label>Effort</label><select id="f-effort"><option value="">default</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
+        <div class="frow"><label>Worker model</label><select id="f-worker"><option value="">none (not orchestrated)</option><option>claude-fable-5</option><option>claude-opus-4-8</option><option>claude-sonnet-5</option><option>claude-haiku-4-5</option></select></div>
+        <div class="frow"><label>Worker effort</label><select id="f-worker-effort"><option value="">inherit</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
         <div class="frow"><label>Max cycle (min)</label><input type="number" id="f-maxCycle" value="120"></div>
         <div class="frow"><label>Critic ratio</label><input type="number" id="f-critic" value="5" min="0" title="every Nth cycle is a critic; 0 = off"></div>
         <div class="frow"><label>Review gate</label><input type="number" id="f-gate" value="0" min="0" title="pause for review after N cycles; 0 = off"></div>
@@ -737,6 +747,67 @@ function renderTailLine(raw) {
   return `<div class="${cls}"><span class="t">${escapeHtml(timeShort(iso))}</span> ${label}${escapeHtml(msg)}</div>`;
 }
 
+const MODEL_OPTS = ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'];
+const EFFORT_OPTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function optionList(values, current, blankLabel) {
+  // Ensure a current value not in the canonical list still appears/selects.
+  const list = (current && values.indexOf(current) === -1) ? [current].concat(values) : values;
+  let html = blankLabel != null ? `<option value=""${current ? '' : ' selected'}>${escapeHtml(blankLabel)}</option>` : '';
+  for (const v of list) {
+    html += `<option value="${escapeHtml(v)}"${v === current ? ' selected' : ''}>${escapeHtml(v)}</option>`;
+  }
+  return html;
+}
+
+// Editable per-project config. Model (orchestrator/main), effort, and -
+// when orchestration is on or being turned on - the worker model and its
+// effort. Changes take effect on the next cycle; an in-flight cycle keeps
+// the model/effort it was spawned with.
+function renderConfigCard(p) {
+  return `
+    <div class="card">
+      <h3>Config <span class="sub">applies on the next cycle</span></h3>
+      <div class="cfg-grid">
+        <label>Model (orchestrator)<select id="cfg-model">${optionList(MODEL_OPTS, p.model, null)}</select></label>
+        <label>Effort<select id="cfg-effort">${optionList(EFFORT_OPTS, p.effort || '', 'default')}</select></label>
+        <label>Worker model<select id="cfg-worker">${optionList(MODEL_OPTS, p.workerModel || '', 'none (not orchestrated)')}</select></label>
+        <label>Worker effort<select id="cfg-worker-effort">${optionList(EFFORT_OPTS, p.workerEffort || '', 'inherit')}</select></label>
+        <label>Critic ratio<input type="number" id="cfg-critic" min="0" value="${safeNum(p.criticRatio, 0)}"></label>
+        <label>Review gate<input type="number" id="cfg-gate" min="0" value="${safeNum(p.reviewGateCycles, 0)}"></label>
+      </div>
+      <div class="cfg-actions">
+        <span class="cfg-note">Set a worker model to make this an orchestrated project (big model plans, worker executes).</span>
+        <button class="primary" onclick="saveConfig()">Save config</button>
+      </div>
+    </div>`;
+}
+
+async function saveConfig() {
+  if (!selectedId) return;
+  const g = (id) => document.getElementById(id);
+  const patch = {
+    model: g('cfg-model').value,
+    effort: g('cfg-effort').value,          // '' => revert to CLI default
+    workerModel: g('cfg-worker').value,      // '' => turn orchestration off
+    workerEffort: g('cfg-worker-effort').value, // '' => inherit orchestrator effort
+    criticRatio: Number(g('cfg-critic').value),
+    reviewGateCycles: Number(g('cfg-gate').value),
+  };
+  try {
+    if (isMock) { console.log('[mock] config (no-op)', patch); return; }
+    const res = await fetch('/api/projects/' + encodeURIComponent(selectedId) + '/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch)
+    });
+    if (!res.ok) throw new Error('POST /config -> ' + res.status);
+    applyStatus(await res.json());
+    renderDetailShell(false);
+  } catch (e) {
+    console.error(e);
+    alert('Save config failed: ' + e.message);
+  }
+}
+
 function renderInvestedCard(p) {
   const t = p.totals;
   if (!t || !t.cycles) return '';
@@ -778,12 +849,14 @@ function renderDetailShell(loading, errorMsg) {
       <span class="d-name">${escapeHtml(p.id)}</span>
       <span class="d-dir">${escapeHtml(p.dir)}</span>
       <span class="d-meta">
-        <span class="tag">${escapeHtml(p.model)}</span>
+        <span class="tag">${escapeHtml(p.model)}${p.effort ? ' &middot; ' + escapeHtml(p.effort) : ''}</span>
+        ${p.workerModel ? `<span class="tag">worker: ${escapeHtml(p.workerModel)}${p.workerEffort ? ' &middot; ' + escapeHtml(p.workerEffort) : ''}</span>` : ''}
         <span class="tag">critic 1:${safeNum(p.criticRatio, 0) || 'off'}</span>
         <span class="tag">gate ${safeNum(p.reviewGateCycles, 0) || 'off'}</span>
         <span class="tag" ${p.containment === 'off' ? 'style="color:var(--accent);border-color:rgba(224,53,53,.35)"' : ''}>containment ${escapeHtml(p.containment)}</span>
       </span>
     </div>
+    ${renderConfigCard(p)}
     <div class="card">
       <h3>Inject <span class="sub">directive for the next work cycle</span></h3>
       ${detailCache.injectText ? `
@@ -931,6 +1004,9 @@ async function submitAdd(ev) {
     prompt: document.getElementById('f-prompt').value.trim(),
     priority: +document.getElementById('f-priority').value || 1,
     model: document.getElementById('f-model').value,
+    effort: document.getElementById('f-effort').value,
+    workerModel: document.getElementById('f-worker').value,
+    workerEffort: document.getElementById('f-worker-effort').value,
     maxCycleMinutes: +document.getElementById('f-maxCycle').value || 120,
     criticRatio: +document.getElementById('f-critic').value || 0,
     reviewGateCycles: +document.getElementById('f-gate').value || 0,

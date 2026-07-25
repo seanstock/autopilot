@@ -371,6 +371,18 @@ function startServer({ scheduler, port }) {
       return sendJson(res, 200, scheduler.snapshot());
     }
 
+    // Edit an existing project's config (model, workerModel, effort,
+    // workerEffort, verifyCmd, criticRatio, ...). The body is a partial
+    // patch; the scheduler/state layer validates each field and ignores
+    // anything invalid or non-editable. Applies on the next cycle.
+    m = pathname.match(/^\/api\/projects\/([^/]+)\/config$/);
+    if (m && method === 'POST') {
+      const body = await readJsonBody(req);
+      const ok = scheduler.updateProject(m[1], body);
+      if (!ok) return sendJson(res, 400, { error: 'unknown project or empty patch' });
+      return sendJson(res, 200, scheduler.snapshot());
+    }
+
     if (method === 'POST' && pathname === '/api/pause') {
       scheduler.pauseAll();
       return sendJson(res, 200, scheduler.snapshot());

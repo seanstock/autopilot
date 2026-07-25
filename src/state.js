@@ -153,48 +153,94 @@ function addProject(stateObj, opts) {
     prompt: options.prompt || '',
   });
 
-  // I6 fix (server-side half): priority/maxCycleMinutes/criticRatio/
-  // reviewGateCycles are numeric-expected fields with no prior type check -
-  // POST /api/projects passes the request body straight through. A
-  // non-numeric value here does not just misrender in the UI (the other,
-  // client-side half of I6): stored verbatim in projects.json it becomes
-  // reachable stored-XSS the next time the UI renders that project. Reject
-  // (fall back to the default) rather than store an unvalidated value.
-  const NUMERIC_KEYS = new Set(['priority', 'maxCycleMinutes', 'criticRatio', 'reviewGateCycles']);
-  // v0.3: verifyCmd/workerModel are optional non-empty-string fields that
-  // enable per-cycle gating / orchestration respectively when present.
-  // Same stored-XSS concern as I6 above applies (projects.json renders back
-  // into the UI) - a non-string or empty value is dropped rather than
-  // stored, and since neither has a PROJECT_DEFAULTS entry, "dropped" means
-  // the field stays absent (feature off), not reset to some default.
-  const STRING_KEYS = new Set(['verifyCmd', 'workerModel']);
-  for (const key of [
-    'priority',
-    'model',
-    'maxCycleMinutes',
-    'criticRatio',
-    'reviewGateCycles',
-    'containment',
-    'enabled',
-    'verifyCmd',
-    'workerModel',
-  ]) {
-    if (options[key] === undefined) continue;
-    if (NUMERIC_KEYS.has(key)) {
-      const n = Number(options[key]);
-      if (Number.isFinite(n)) project[key] = n;
-      continue;
-    }
-    if (STRING_KEYS.has(key)) {
-      if (typeof options[key] === 'string' && options[key].trim().length > 0) {
-        project[key] = options[key];
-      }
-      continue;
-    }
-    project[key] = options[key];
-  }
+  for (const key of EDITABLE_KEYS) applyProjectField(project, key, options[key], false);
 
   stateObj.projects.push(project);
+  return project;
+}
+
+// The set of project-config fields a caller (add form / update endpoint /
+// CLI) may set. id/dir/prompt are handled separately (id/dir are identity,
+// never editable here). Order is irrelevant.
+const EDITABLE_KEYS = [
+  'priority',
+  'model',
+  'workerModel',
+  'effort',
+  'workerEffort',
+  'maxCycleMinutes',
+  'criticRatio',
+  'reviewGateCycles',
+  'containment',
+  'verifyCmd',
+  'enabled',
+];
+
+const NUMERIC_KEYS = new Set(['priority', 'maxCycleMinutes', 'criticRatio', 'reviewGateCycles']);
+// claude --effort levels (code.claude.com/docs/en/model-config). max is
+// accepted here because Autopilot passes effort via the `--effort` CLI
+// flag, not the settings file (settings-file effortLevel forbids max).
+const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+// A model id is a safe-charset token. Validating it (rather than storing
+// the request body verbatim) closes the same stored-XSS hole the I6 fix
+// closed for the numeric fields: model renders straight into the UI DOM.
+const MODEL_RE = /^[a-z0-9][a-z0-9.\-]{0,63}$/i;
+
+// Validate-and-assign a single field onto a project object. Invalid values
+// are dropped, never stored (stored-XSS defense: every one of these renders
+// back into the UI). allowClear=true (update path) lets an explicit null/''
+// REMOVE an optional field - workerModel:'' turns orchestration off,
+// effort:'' reverts to the CLI default, verifyCmd:'' removes the gate.
+// model is never clearable (it always has a value) and enabled/containment
+// are not clearable (they have defaults).
+function applyProjectField(target, key, value, allowClear) {
+  if (value === undefined) return;
+  const isClear = value === null || value === '';
+
+  if (NUMERIC_KEYS.has(key)) {
+    const n = Number(value);
+    if (Number.isFinite(n)) target[key] = n;
+    return;
+  }
+  if (key === 'enabled') {
+    if (typeof value === 'boolean') target[key] = value;
+    return;
+  }
+  if (key === 'containment') {
+    if (value === 'standard' || value === 'off') target[key] = value;
+    return;
+  }
+  if (key === 'model' || key === 'workerModel') {
+    if (typeof value === 'string' && MODEL_RE.test(value.trim())) {
+      target[key] = value.trim();
+    } else if (allowClear && isClear && key === 'workerModel') {
+      delete target[key];
+    }
+    return;
+  }
+  if (key === 'effort' || key === 'workerEffort') {
+    if (typeof value === 'string' && EFFORT_LEVELS.has(value.trim().toLowerCase())) {
+      target[key] = value.trim().toLowerCase();
+    } else if (allowClear && isClear) {
+      delete target[key];
+    }
+    return;
+  }
+  if (key === 'verifyCmd') {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      target[key] = value;
+    } else if (allowClear && isClear) {
+      delete target[key];
+    }
+  }
+}
+
+// Apply a partial config patch to an existing project in place (validated,
+// clear-capable). Returns the project, or null if the id is unknown.
+function updateProject(stateObj, id, patch) {
+  const project = getProject(stateObj, id);
+  if (!project || !patch || typeof patch !== 'object') return null;
+  for (const key of EDITABLE_KEYS) applyProjectField(project, key, patch[key], true);
   return project;
 }
 
@@ -228,6 +274,7 @@ module.exports = {
   save,
   getProject,
   addProject,
+  updateProject,
   readRuntime,
   writeRuntime,
   readFatal,

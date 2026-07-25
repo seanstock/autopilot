@@ -27,6 +27,43 @@ test.afterEach(() => {
   delete process.env.AUTOPILOT_HOME_OVERRIDE;
 });
 
+test('addProject validates effort (enum) and model (safe charset); drops junk', () => {
+  const s = { projects: [] };
+  const p = state.addProject(s, { dir: tempProjectDir(), model: 'claude-opus-4-8', effort: 'high', workerModel: 'claude-sonnet-5', workerEffort: 'low' });
+  assert.equal(p.model, 'claude-opus-4-8');
+  assert.equal(p.effort, 'high');
+  assert.equal(p.workerModel, 'claude-sonnet-5');
+  assert.equal(p.workerEffort, 'low');
+
+  const bad = state.addProject(s, { dir: tempProjectDir(), effort: 'turbo', model: '<img src=x>' });
+  assert.equal(bad.effort, undefined, 'invalid effort dropped');
+  assert.equal(bad.model, 'claude-sonnet-5', 'XSS-shaped model rejected, falls back to default');
+});
+
+test('updateProject patches editable fields, validates, and can clear optionals', () => {
+  const s = { projects: [] };
+  const p = state.addProject(s, { dir: tempProjectDir(), model: 'claude-sonnet-5', workerModel: 'claude-sonnet-5', effort: 'high' });
+  const id = p.id;
+
+  // switch orchestrator to opus + raise effort
+  const u1 = state.updateProject(s, id, { model: 'claude-opus-4-8', effort: 'xhigh' });
+  assert.equal(u1.model, 'claude-opus-4-8');
+  assert.equal(u1.effort, 'xhigh');
+
+  // invalid values are ignored, existing value preserved
+  state.updateProject(s, id, { effort: 'nope', model: 'has spaces' });
+  assert.equal(state.getProject(s, id).effort, 'xhigh');
+  assert.equal(state.getProject(s, id).model, 'claude-opus-4-8');
+
+  // clear worker model (turn orchestration off) and effort (revert default)
+  const u2 = state.updateProject(s, id, { workerModel: '', effort: '' });
+  assert.equal('workerModel' in u2, false, 'empty workerModel clears the field');
+  assert.equal('effort' in u2, false, 'empty effort reverts to CLI default');
+
+  // unknown project -> null
+  assert.equal(state.updateProject(s, 'nope', { model: 'x' }), null);
+});
+
 test('load() with no projects.json returns default settings and empty projects', () => {
   const result = state.load();
   assert.deepEqual(result.projects, []);
