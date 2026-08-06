@@ -15,6 +15,7 @@ const RUNTIME_FILENAME = 'state.json';
 const DEFAULT_SETTINGS = {
   ceilingPct: 75,
   graceMinutes: 30,
+  notes: '',
   webhook: null,
   port: 4680,
 };
@@ -163,6 +164,7 @@ function addProject(stateObj, opts) {
 // CLI) may set. id/dir/prompt are handled separately (id/dir are identity,
 // never editable here). Order is irrelevant.
 const EDITABLE_KEYS = [
+  'prompt',
   'priority',
   'model',
   'workerModel',
@@ -223,6 +225,15 @@ function applyProjectField(target, key, value, allowClear) {
       target[key] = value.trim().toLowerCase();
     } else if (allowClear && isClear) {
       delete target[key];
+    }
+    return;
+  }
+  if (key === 'prompt') {
+    // The mission prompt is the single surface a human edits. It is free text,
+    // so the only rule is that it must be a non-empty string - clearing it
+    // would leave cycles with no instructions at all.
+    if (typeof value === 'string' && value.trim().length > 0) {
+      target[key] = value;
     }
     return;
   }
