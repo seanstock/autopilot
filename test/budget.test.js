@@ -68,15 +68,22 @@ test('normalizes utilization: 0.42 and 42 both -> 42', async () => {
   assert.equal(five2.pct, 42);
 });
 
-test('normalizePct edge cases: documented ambiguity at exactly 1', () => {
+test('normalizePct edge cases: exactly 1 resolves as 1%, not 100%', () => {
   const { normalizePct } = require('../src/budget');
   assert.equal(normalizePct(0.75), 75);
   assert.equal(normalizePct(75), 75);
   assert.equal(normalizePct(0.01), 1);
-  // Documented, accepted ambiguity: a raw value of exactly 1 cannot be
-  // distinguished between "1%" and "100% expressed as a fraction". Our rule
-  // (values <= 1 are fractions) resolves it as 100.
-  assert.equal(normalizePct(1), 100);
+  // This previously resolved to 100, reasoning that a raw 1 cannot be told
+  // apart from "100% as a fraction" and that over-estimating usage fails safe.
+  // Live evidence settled the ambiguity: the endpoint reports percentages (a
+  // 42% week arrives as 42, a full five-hour window as 100), so a raw 1 is 1%.
+  //
+  // It also failed unsafe rather than safe in practice. 1% is what a window
+  // reads just after it rolls over - the moment of MAXIMUM headroom - so the
+  // old rule halted the loop for a whole window precisely when it should have
+  // been running. Observed 2026-08-05: the UI showed 1% used, the meter
+  // reported 100%, and cycles stopped for hours.
+  assert.equal(normalizePct(1), 1);
   assert.equal(normalizePct(0), 0);
   assert.equal(normalizePct('not a number'), null);
   assert.equal(normalizePct(NaN), null);
@@ -403,6 +410,86 @@ test('M2: noteUsageLimitExit uses the real resets_at from the last successful po
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'ceiling');
   assert.equal(result.resetsAt, new Date(futureResetsAt).toISOString());
+});
+
+test('a genuine 1% utilization is not scaled to 100% and does not stop the loop', async () => {
+  const credPath = tempCredFile({ claudeAiOauth: { accessToken: 'tok' } });
+  const fetchImpl = async () => jsonResponse(200, {
+    five_hour: { utilization: 1, resets_at: new Date(Date.now() + 3600000).toISOString() },
+    seven_day: { utilization: 42, resets_at: new Date(Date.now() + 86400000).toISOString() },
+  });
+  const mgr = new BudgetManager({ settings: { ceilingPct: 75 }, fetchImpl, credPath });
+  const r = await mgr.check();
+  assert.equal(r.windows.find((w) => w.name === 'five_hour').pct, 1, '1 means 1%, not 100%');
+  assert.equal(r.windows.find((w) => w.name === 'seven_day').pct, 42);
+  assert.equal(r.ok, true, 'must not halt at 1% used');
+});
+
+test('a fractional utilization below 1 is still scaled to a percentage', async () => {
+  const credPath = tempCredFile({ claudeAiOauth: { accessToken: 'tok' } });
+  const fetchImpl = async () => jsonResponse(200, { five_hour: { utilization: 0.8, resets_at: null } });
+  const mgr = new BudgetManager({ settings: { ceilingPct: 75 }, fetchImpl, credPath });
+  const r = await mgr.check();
+  assert.equal(r.windows[0].pct, 80);
+  assert.equal(r.ok, false);
+});
+
+// ---------------------------------------------------------------------------
+// Forced-latch re-verification: a usage_limit exit is evidence about the
+// moment it happened, not a promise about the whole window. Observed live:
+// five_hour was back to 1% at 17:05 but the latch held the loop idle until
+// its 22:00 resets_at - about four hours of dead time.
+// ---------------------------------------------------------------------------
+
+test('forced ceiling releases early once the real meter reports headroom', async () => {
+  const credPath = tempCredFile({ claudeAiOauth: { accessToken: 'tok' } });
+  const farFuture = new Date(Date.now() + 5 * 3600000).toISOString();
+  let util = 100;
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return jsonResponse(200, { five_hour: { utilization: util, resets_at: farFuture } });
+  };
+  // forcedRecheckMs 0 => every check re-verifies.
+  const mgr = new BudgetManager({
+    settings: { ceilingPct: 75 }, fetchImpl, credPath,
+    minIntervalMs: 0, forcedRecheckMs: 0,
+  });
+  await mgr.check();
+  mgr.noteUsageLimitExit();
+
+  // Still genuinely over: the latch must hold.
+  let r = await mgr.check();
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'ceiling');
+
+  // Window rolled over. The latch must NOT outlive the evidence.
+  util = 10;
+  r = await mgr.check();
+  assert.equal(r.ok, true, 'must resume once the meter shows headroom');
+  assert.equal(r.reason, null);
+  assert.ok(calls >= 2, 'must actually re-poll rather than answer from the latch');
+});
+
+test('forced ceiling is not re-polled before forcedRecheckMs has elapsed', async () => {
+  const credPath = tempCredFile({ claudeAiOauth: { accessToken: 'tok' } });
+  const farFuture = new Date(Date.now() + 5 * 3600000).toISOString();
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return jsonResponse(200, { five_hour: { utilization: 10, resets_at: farFuture } });
+  };
+  const mgr = new BudgetManager({
+    settings: { ceilingPct: 75 }, fetchImpl, credPath,
+    minIntervalMs: 0, forcedRecheckMs: 60000,
+  });
+  await mgr.check();
+  const before = calls;
+  mgr.noteUsageLimitExit();
+  const r = await mgr.check();
+  assert.equal(r.ok, false, 'latch answers immediately inside the recheck window');
+  assert.equal(r.reason, 'ceiling');
+  assert.equal(calls, before, 'must not hit the endpoint inside the recheck window');
 });
 
 // ---------------------------------------------------------------------------

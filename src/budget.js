@@ -46,7 +46,12 @@ function normalizePct(value) {
   const n = typeof value === 'number' ? value : Number(value);
   if (typeof value !== 'number' && typeof value !== 'string') return null;
   if (!Number.isFinite(n)) return null;
-  if (n <= 1) return n * 100;
+  // The endpoint reports percentages (a 42% week arrives as 42), but has
+  // historically also sent fractions, so a genuinely fractional value is still
+  // scaled. The boundary must be STRICT: `<= 1` mapped a real 1% window to
+  // 100% and halted the loop at the exact moment it had the most headroom.
+  // Observed live: UI said 1% used, the meter reported 100%, cycles stopped.
+  if (n < 1) return n * 100;
   return n;
 }
 
@@ -142,6 +147,12 @@ class BudgetManager {
     this._backoffMs = 0; // current backoff duration, 0 = no backoff active
     this._backoffUntil = 0; // ms epoch until which we must not call the endpoint
     this._forcedUntilResetsAt = null; // set by noteUsageLimitExit()
+    // How often a forced over-ceiling latch is re-verified against the real
+    // meter. Without this the latch is trusted blind until its resets_at,
+    // which can idle the loop for hours after the window has already rolled
+    // over (observed: five_hour back to 1% at 17:05, latch held until 22:00).
+    this.forcedRecheckMs = opts.forcedRecheckMs != null ? opts.forcedRecheckMs : 5 * 60 * 1000;
+    this._forcedCheckedAt = 0; // ms epoch of the last forced-latch verification
   }
 
   overCeiling(windows) {
@@ -175,6 +186,9 @@ class BudgetManager {
   noteUsageLimitExit() {
     const fallback = this._lastResult && this._lastResult.resetsAt;
     this._forcedUntilResetsAt = fallback || new Date(Date.now() + DEFAULT_FORCED_FALLBACK_MS).toISOString();
+    // Start the re-verification clock now: the exit just proved we are over,
+    // so there is nothing to learn from polling for another forcedRecheckMs.
+    this._forcedCheckedAt = Date.now();
   }
 
   _resultFromCache(checkedIso) {
@@ -251,17 +265,29 @@ class BudgetManager {
     if (this._forcedUntilResetsAt) {
       const resetsMs = Date.parse(this._forcedUntilResetsAt);
       if (!Number.isNaN(resetsMs) && now < resetsMs) {
-        return {
-          ok: false,
-          reason: 'ceiling',
-          windows: this._lastResult ? this._lastResult.windows : [],
-          resetsAt: this._forcedUntilResetsAt,
-          checkedIso,
-        };
+        // Answer from the latch, but re-verify against the real meter every
+        // forcedRecheckMs. A usage_limit exit is evidence about the moment it
+        // happened, not a promise about the next five hours: the window can
+        // roll over early, and a transient limit can clear. Trusting the latch
+        // blind until resets_at idles the loop long after the meter recovered.
+        if (now - this._forcedCheckedAt < this.forcedRecheckMs) {
+          return {
+            ok: false,
+            reason: 'ceiling',
+            windows: this._lastResult ? this._lastResult.windows : [],
+            resetsAt: this._forcedUntilResetsAt,
+            checkedIso,
+          };
+        }
+        // Due for verification: fall through to a real poll. The latch stays
+        // set unless that poll comes back genuinely under ceiling (see below),
+        // so a failed or over-ceiling poll changes nothing.
+        this._forcedCheckedAt = now;
+      } else {
+        // resets_at has passed (or was unparsable): release the force and
+        // fall through to attempt a fresh real poll.
+        this._forcedUntilResetsAt = null;
       }
-      // resets_at has passed (or was unparsable): release the force and
-      // fall through to attempt a fresh real poll.
-      this._forcedUntilResetsAt = null;
     }
 
     // Exponential backoff window from a prior 429.
@@ -335,6 +361,14 @@ class BudgetManager {
 
     const overWindows = windows.filter((w) => this.overCeiling([w]));
     const over = overWindows.length > 0;
+
+    // A fresh reading is better evidence than the latch. If the meter now says
+    // we are under ceiling, the window rolled over or the limit was transient:
+    // release the latch instead of idling until its resets_at.
+    if (!over && this._forcedUntilResetsAt) {
+      this._forcedUntilResetsAt = null;
+    }
+
     return {
       ok: !over,
       reason: over ? 'ceiling' : null,
