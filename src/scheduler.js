@@ -656,6 +656,7 @@ class Scheduler extends EventEmitter {
         cycleNumber,
         budget: this.budget,
         claudeCmd: project.claudeCmd,
+        notes: this.stateObj.settings.notes || '',
       });
     } catch (err) {
       // runCycle's contract is "never rejects"; guard anyway so a broken
@@ -902,6 +903,7 @@ class Scheduler extends EventEmitter {
         ceilingPct: this.stateObj.settings.ceilingPct,
         graceMinutes: this.stateObj.settings.graceMinutes,
         webhook: this.stateObj.settings.webhook,
+        notes: this.stateObj.settings.notes || '',
       },
       current: fatalRecord ? null : this._current,
       totals: (() => {

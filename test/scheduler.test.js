@@ -996,7 +996,10 @@ test('snapshot matches the shared status contract shape', async () => {
   assert.deepEqual(Object.keys(snap).sort(), ['budget', 'current', 'daemon', 'fatal', 'projects', 'settings', 'totals'].sort());
   assert.deepEqual(Object.keys(snap.daemon).sort(), ['pid', 'startedIso', 'version', 'paused'].sort());
   assert.deepEqual(Object.keys(snap.budget).sort(), ['ok', 'reason', 'checkedIso', 'windows'].sort());
-  assert.deepEqual(Object.keys(snap.settings).sort(), ['ceilingPct', 'graceMinutes', 'webhook'].sort());
+  // 'notes' is the shared "things to know" prepended to every project's
+  // mission. It rides in settings so the UI can edit it in one place.
+  assert.deepEqual(Object.keys(snap.settings).sort(),
+    ['ceilingPct', 'graceMinutes', 'webhook', 'notes'].sort());
 
   const p = snap.projects[0];
   for (const key of ['status', 'statusDetail', 'cycle', 'sinceReview', 'lastExit', 'lastCommit', 'lastVerify', 'pendingInject', 'totals', 'orders']) {

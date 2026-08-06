@@ -205,12 +205,12 @@ function safeEnsureContainment(project) {
   }
 }
 
-function buildPreamble(project, kind, order) {
+function buildPreamble(project, kind, order, notes) {
   try {
-    if (kind === 'critic') return preambles.criticPreamble(project);
+    if (kind === 'critic') return preambles.criticPreamble(project, notes);
     if (kind === 'wrapup') return preambles.wrapupPreamble(project);
-    if (kind === 'orchestrate') return preambles.orchestratorPreamble(project);
-    let base = preambles.workPreamble(project);
+    if (kind === 'orchestrate') return preambles.orchestratorPreamble(project, notes);
+    let base = preambles.workPreamble(project, notes);
     if (order) {
       base = `${base}\n${preambles.workerOrderSection(order)}`;
     }
@@ -414,7 +414,7 @@ async function runCycle(opts) {
       ? orchestrateSettingsPath || settingsPath
       : settingsPath;
   const preHead = gitRevParseHead(dir);
-  let preamble = buildPreamble(project, kind, order);
+  let preamble = buildPreamble(project, kind, order, opts.notes);
   const injection = consumeInjection(project, kind, cycleNumber, order);
   if (injection) {
     preamble = `${preamble}\n${preambles.injectionSection(injection, !!project.workerModel)}`;

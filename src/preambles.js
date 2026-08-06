@@ -23,8 +23,21 @@ function reviewGateClause(project) {
   );
 }
 
-function workPreamble(project) {
-  const prompt = (project && project.prompt) || '';
+// Global operating notes: one shared "things to know" that applies to every
+// project, edited in the UI next to the per-project mission. Prepended so a
+// cycle reads house rules first, then its own job. It lives here rather than
+// in a file inside a project directory: a rules file the user cannot see from
+// the UI is a rule they cannot steer.
+function buildMission(project, notes) {
+  const mission = (project && project.prompt) || '';
+  const n = typeof notes === 'string' ? notes.trim() : '';
+  if (!n) return mission;
+  return '## Things to know (applies to every project)\n\n'
+    + n + '\n\n---\n\n' + mission;
+}
+
+function workPreamble(project, notes) {
+  const prompt = buildMission(project, notes);
   return `You are running one autonomous work cycle under Autopilot (cycle contract v${PREAMBLE_VERSION}).
 This preamble is fixed and not part of the mission - it is the operating
 contract every cycle runs under. Follow it exactly, in order.
@@ -105,8 +118,8 @@ ${prompt}
 `;
 }
 
-function criticPreamble(project) {
-  const prompt = (project && project.prompt) || '';
+function criticPreamble(project, notes) {
+  const prompt = buildMission(project, notes);
   // M6 (v0.3 review): an orchestrated project's critic runs with the Task
   // tool available - it gets the same scout-only constraint the
   // orchestrator preamble carries, or the read-only-fan-out invariant
@@ -264,8 +277,8 @@ This is not optional context; it is the human steering the mission.
 // consume. See docs/plans/2026-07-24-goal-loop.md "Shared contracts" for
 // the exact order format and the effort-scaling rule this preamble quotes
 // verbatim for the scout subagent.
-function orchestratorPreamble(project) {
-  const prompt = (project && project.prompt) || '';
+function orchestratorPreamble(project, notes) {
+  const prompt = buildMission(project, notes);
   return `You are running one autonomous ORCHESTRATE cycle under Autopilot (cycle
 contract v${PREAMBLE_VERSION}). This is a PLANNING cycle, not a work cycle: you
 do NO implementation work yourself this cycle. Your only job is to read the
