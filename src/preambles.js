@@ -32,7 +32,7 @@ function buildMission(project, notes) {
   const mission = (project && project.prompt) || '';
   const n = typeof notes === 'string' ? notes.trim() : '';
   if (!n) return mission;
-  return '## Things to know (applies to every project)\n\n'
+  return '## Universal Notes (apply to every project)\n\n'
     + n + '\n\n---\n\n' + mission;
 }
 

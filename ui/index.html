@@ -182,6 +182,24 @@
   .modal .m-actions { display: flex; justify-content: flex-end; gap: 8px; }
   .contain-warn { display: none; font-size: 12px; color: var(--accent); margin: -8px 0 16px; }
 
+  /* ---------- text editor modal (notes, prompt, verify) ---------- */
+  #editBg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.68); z-index: 20; }
+  #editBg.on { display: flex; align-items: center; justify-content: center; padding: 4vh 3vw; }
+  .editor { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+            padding: 22px 24px; width: 900px; max-width: 96vw; height: 88vh;
+            display: flex; flex-direction: column; gap: 12px; }
+  .editor h3 { font-size: 19px; font-weight: 600; margin: 0; }
+  .editor .hint { font-size: 12.5px; color: var(--text-secondary); line-height: 1.55; margin: 0; }
+  .editor textarea { flex: 1 1 auto; width: 100%; resize: none; padding: 14px 16px;
+                     background: var(--bg, #0d0d10); color: var(--text-primary, #e8e8e8);
+                     border: 1px solid var(--border); border-radius: 8px;
+                     font-family: var(--font-mono); font-size: 13px; line-height: 1.6;
+                     tab-size: 2; }
+  .editor textarea:focus { outline: none; border-color: #8FCBE3; }
+  .editor .e-foot { display: flex; align-items: center; gap: 10px; }
+  .editor .e-count { font-size: 12px; color: var(--text-secondary);
+                     font-family: var(--font-mono); margin-right: auto; }
+
   /* ---------- invested tile ---------- */
   .invested { border-left: 1px solid var(--border); padding-left: 24px; display: flex; flex-direction: column; justify-content: center; gap: 3px; min-width: 130px; }
   .inv-label { font-size: 11px; color: var(--text-secondary); }
@@ -240,7 +258,7 @@
       <div class="ctl-row"><span>ceiling</span><input type="range" id="ceil" min="10" max="100" value="75"><span class="val" id="ceilVal">75%</span></div>
       <div class="ctl-row"><span>grace</span><input type="number" id="grace" value="30" min="0"> <span>min</span></div>
       <button id="pauseBtn" onclick="togglePause()">Pause all</button>
-      <button onclick="editNotes()" title="Shared instructions prepended to every project's mission">Things to know</button>
+      <button onclick="editNotes()" title="Notes prepended to every project mission">Universal Notes</button>
     </div>
   </header>
 
@@ -260,6 +278,19 @@
     <span id="mockTag"></span>
     <span style="margin-left:auto">autopilot v0.2</span>
   </footer>
+</div>
+
+<div id="editBg" onclick="if(event.target===this)closeEditor()">
+  <div class="editor">
+    <h3 id="e-title">Edit</h3>
+    <p class="hint" id="e-hint"></p>
+    <textarea id="e-text" spellcheck="false"></textarea>
+    <div class="e-foot">
+      <span class="e-count" id="e-count"></span>
+      <button onclick="closeEditor()">Cancel</button>
+      <button class="primary" onclick="saveEditor()">Save</button>
+    </div>
+  </div>
 </div>
 
 <div id="modalBg" onclick="if(event.target===this)closeModal()">
@@ -636,40 +667,95 @@ function actionsFor(p) {
 /* The verify gate: a shell command the runner itself executes after every
    cycle, before auto-commit. Its result is ground truth about "does this still
    work" - unlike the critic, which reviews and opines. Empty string removes it. */
-async function editVerify(id) {
+function editVerify(id) {
   const p = (status.projects || []).find(x => x.id === id);
-  const current = (p && p.verifyCmd) || '';
-  const next = window.prompt(
-    `Verify command for ${id}.\n\nRun by the runner after every cycle, from the project directory. Non-zero exit = the cycle failed, whatever the model claimed.\n\nExamples:  node verify.mjs   |   npm test   |   ./deploy.sh\n\nLeave blank to remove the gate.`,
-    current);
-  if (next === null) return;
-  await doAction(`/api/projects/${encodeURIComponent(id)}/config`, {verifyCmd: next});
+  openEditor({
+    title: `Verify command — ${id}`,
+    hint: 'Run by the runner itself after every cycle, from the project directory. A '
+        + 'non-zero exit means the cycle failed, whatever the model claimed about it. '
+        + 'Examples: node verify.mjs | npm test | ./deploy.sh. Blank removes the gate.',
+    value: (p && p.verifyCmd) || '',
+    onSave: v => doAction(`/api/projects/${encodeURIComponent(id)}/config`, {verifyCmd: v}),
+  });
 }
 
-/* One shared "things to know", prepended to every project's mission. This is
-   the only place general house rules belong: a rules file inside a project
-   directory is invisible from here, so it cannot be steered. */
-async function editNotes() {
-  const current = (status.settings && status.settings.notes) || '';
-  const next = window.prompt(
-    'Things to know — applies to EVERY project.\n\nPrepended to each project\'s own mission prompt. Put house rules here, never in files inside a project.',
-    current);
-  if (next === null) return;
-  await doAction('/api/settings', {notes: next});
+/* ============================================================
+   Text editor modal
+   Used for anything long enough that a one-line window.prompt is useless:
+   the Universal Notes, a project's mission prompt, its verify command.
+   ============================================================ */
+let editorSave = null;
+
+function openEditor({title, hint, value, onSave}) {
+  document.getElementById('e-title').textContent = title;
+  document.getElementById('e-hint').textContent = hint;
+  const ta = document.getElementById('e-text');
+  ta.value = value || '';
+  editorSave = onSave;
+  document.getElementById('editBg').classList.add('on');
+  updateEditorCount();
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+
+function closeEditor() {
+  document.getElementById('editBg').classList.remove('on');
+  editorSave = null;
+}
+
+function updateEditorCount() {
+  const v = document.getElementById('e-text').value;
+  document.getElementById('e-count').textContent =
+    `${v.length} chars · ${v ? v.split('\n').length : 0} lines`;
+}
+
+async function saveEditor() {
+  const v = document.getElementById('e-text').value;
+  const fn = editorSave;
+  closeEditor();
+  if (fn) await fn(v);
+}
+
+document.addEventListener('input', e => {
+  if (e.target && e.target.id === 'e-text') updateEditorCount();
+});
+document.addEventListener('keydown', e => {
+  if (!document.getElementById('editBg').classList.contains('on')) return;
+  if (e.key === 'Escape') closeEditor();
+  // ctrl/cmd+enter saves, so a long edit never needs the mouse
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveEditor(); }
+});
+
+/* The Universal Notes, prepended to every project's mission. This is the only
+   place general house rules belong: a rules file inside a project directory is
+   invisible from here, so it cannot be steered. */
+function editNotes() {
+  openEditor({
+    title: 'Universal Notes',
+    hint: 'Prepended to every project\'s mission prompt, before its own instructions. '
+        + 'House rules and anything true of the whole machine belong here, never in '
+        + 'files inside a project. Esc to cancel, Ctrl+Enter to save.',
+    value: (status.settings && status.settings.notes) || '',
+    onSave: v => doAction('/api/settings', {notes: v}),
+  });
 }
 
 /* The mission prompt is the one surface a human edits. It used to be
    write-once at creation, which is what pushed instructions into invisible
    files inside the project. This edits the real thing, in place. */
-async function editPrompt(id) {
+function editPrompt(id) {
   const p = (status.projects || []).find(x => x.id === id);
-  const current = (p && p.prompt) || '';
-  const next = window.prompt(
-    `Mission prompt for ${id}.\n\nThis is the only instruction every cycle reads. Edit it here, never in files inside the project.`,
-    current);
-  if (next === null) return;
-  if (!next.trim()) { alert('The prompt cannot be empty.'); return; }
-  await doAction(`/api/projects/${encodeURIComponent(id)}/config`, {prompt: next});
+  openEditor({
+    title: `Mission prompt — ${id}`,
+    hint: 'The only instruction this project\'s cycles read, after the Universal Notes. '
+        + 'Say what to build and where it has to end up. Edit it here, never in files '
+        + 'inside the project. Esc to cancel, Ctrl+Enter to save.',
+    value: (p && p.prompt) || '',
+    onSave: async v => {
+      if (!v.trim()) { alert('The prompt cannot be empty.'); return; }
+      await doAction(`/api/projects/${encodeURIComponent(id)}/config`, {prompt: v});
+    },
+  });
 }
 
 /* Last verify result, from the runner's own execution of verifyCmd - not from
