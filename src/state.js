@@ -262,6 +262,15 @@ function updateProject(stateObj, id, patch) {
   return project;
 }
 
+// Remove a project from the registry. Deregisters only: the project's own
+// directory, git history and work product are never touched, because they are
+// the user's, not ours. Returns true if something was removed.
+function removeProject(stateObj, id) {
+  const before = (stateObj.projects || []).length;
+  stateObj.projects = (stateObj.projects || []).filter((p) => p.id !== id);
+  return stateObj.projects.length < before;
+}
+
 function readRuntime(dir) {
   const raw = util.readJson(runtimeFile(dir), null);
   return Object.assign({}, RUNTIME_DEFAULTS, raw && typeof raw === 'object' ? raw : {});
@@ -293,6 +302,7 @@ module.exports = {
   getProject,
   addProject,
   updateProject,
+  removeProject,
   readRuntime,
   writeRuntime,
   readFatal,

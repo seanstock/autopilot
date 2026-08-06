@@ -344,6 +344,15 @@ function startServer({ scheduler, port }) {
       return sendJson(res, 200, scheduler.snapshot());
     }
 
+    // Deregister a project. Its directory, git history and work product are
+    // never touched: those are the user's, and a registry entry is not.
+    m = pathname.match(/^\/api\/projects\/([^/]+)$/);
+    if (m && method === 'DELETE') {
+      const ok = scheduler.removeProject(m[1]);
+      if (!ok) return sendJson(res, 409, { error: 'unknown project, or it is mid-cycle' });
+      return sendJson(res, 200, scheduler.snapshot());
+    }
+
     m = pathname.match(/^\/api\/projects\/([^/]+)\/inject$/);
     if (m) {
       if (method === 'POST') {

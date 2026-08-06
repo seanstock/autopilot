@@ -436,23 +436,25 @@ async function apiGet(url) {
   return res.json();
 }
 
-async function apiPost(url, body) {
+async function apiPost(url, body, method) {
+  const verb = method || 'POST';
   if (isMock) {
-    console.log('[mock] POST (no-op)', url, body || '');
+    console.log('[mock] ' + verb + ' (no-op)', url, body || '');
     return stripMockExtras(mockData || await loadMockData());
   }
+  const sendBody = body !== undefined && body !== null;
   const res = await fetch(url, {
-    method: 'POST',
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined
+    method: verb,
+    headers: sendBody ? { 'Content-Type': 'application/json' } : undefined,
+    body: sendBody ? JSON.stringify(body) : undefined
   });
-  if (!res.ok) throw new Error('POST ' + url + ' -> ' + res.status);
+  if (!res.ok) throw new Error(verb + ' ' + url + ' -> ' + res.status);
   return res.json();
 }
 
-async function doAction(url, body) {
+async function doAction(url, body, method) {
   try {
-    const snap = await apiPost(url, body);
+    const snap = await apiPost(url, body, method);
     if (!isMock) applyStatus(snap);
   } catch (e) {
     console.error(e);
@@ -661,7 +663,24 @@ function actionsFor(p) {
   }
   btns.push(`<button onclick="event.stopPropagation();editPrompt('${p.id}')">Prompt</button>`);
   btns.push(`<button onclick="event.stopPropagation();editVerify('${p.id}')" title="${p.verifyCmd ? 'verify: ' + escapeHtml(p.verifyCmd) : 'no verify gate set'}">Verify${p.verifyCmd ? '' : ' +'}</button>`);
+  if (p.status === 'stopped') {
+    btns.push(`<button onclick="event.stopPropagation();removeProject('${p.id}')" title="deregister this project (its files are not touched)">Delete</button>`);
+  }
   return btns.join('');
+}
+
+/* Deregisters the project. Deliberately does NOT delete the directory: the
+   work product is the user's, and losing it to a mis-click is unrecoverable.
+   Only offered on a stopped project, because the runner holds the directory
+   while a cycle is in flight. */
+async function removeProject(id) {
+  const p = (status.projects || []).find(x => x.id === id);
+  if (!confirm(
+      `Remove "${id}" from Autopilot?\n\n`
+    + `Its folder is NOT deleted:\n${(p && p.dir) || ''}\n\n`
+    + `Only the registration, prompt and settings go. `
+    + `Re-add the same folder later to start it again.`)) return;
+  await doAction(`/api/projects/${encodeURIComponent(id)}`, null, 'DELETE');
 }
 
 /* The verify gate: a shell command the runner itself executes after every

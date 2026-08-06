@@ -1105,6 +1105,18 @@ class Scheduler extends EventEmitter {
     return project;
   }
 
+  // Deregister a project. Refuses while it is mid-cycle: the runner holds the
+  // directory and would keep writing to a project the registry no longer knows
+  // about. Never touches the directory itself.
+  removeProject(id) {
+    if (this._current && this._current.projectId === id) return false;
+    const removed = state.removeProject(this.stateObj, id);
+    if (!removed) return false;
+    state.save(this.stateObj);
+    this._emitStatusIfChanged();
+    return true;
+  }
+
   updateSettings(patch) {
     Object.assign(this.stateObj.settings, patch || {});
     state.save(this.stateObj);
