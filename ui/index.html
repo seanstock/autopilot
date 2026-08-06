@@ -240,6 +240,7 @@
       <div class="ctl-row"><span>ceiling</span><input type="range" id="ceil" min="10" max="100" value="75"><span class="val" id="ceilVal">75%</span></div>
       <div class="ctl-row"><span>grace</span><input type="number" id="grace" value="30" min="0"> <span>min</span></div>
       <button id="pauseBtn" onclick="togglePause()">Pause all</button>
+      <button onclick="editNotes()" title="Shared instructions prepended to every project's mission">Things to know</button>
     </div>
   </header>
 
@@ -627,7 +628,61 @@ function actionsFor(p) {
   } else {
     btns.push(`<button onclick="event.stopPropagation();doAction('/api/projects/${p.id}/stop')">Stop</button>`);
   }
+  btns.push(`<button onclick="event.stopPropagation();editPrompt('${p.id}')">Prompt</button>`);
+  btns.push(`<button onclick="event.stopPropagation();editVerify('${p.id}')" title="${p.verifyCmd ? 'verify: ' + escapeHtml(p.verifyCmd) : 'no verify gate set'}">Verify${p.verifyCmd ? '' : ' +'}</button>`);
   return btns.join('');
+}
+
+/* The verify gate: a shell command the runner itself executes after every
+   cycle, before auto-commit. Its result is ground truth about "does this still
+   work" - unlike the critic, which reviews and opines. Empty string removes it. */
+async function editVerify(id) {
+  const p = (status.projects || []).find(x => x.id === id);
+  const current = (p && p.verifyCmd) || '';
+  const next = window.prompt(
+    `Verify command for ${id}.\n\nRun by the runner after every cycle, from the project directory. Non-zero exit = the cycle failed, whatever the model claimed.\n\nExamples:  node verify.mjs   |   npm test   |   ./deploy.sh\n\nLeave blank to remove the gate.`,
+    current);
+  if (next === null) return;
+  await doAction(`/api/projects/${encodeURIComponent(id)}/config`, {verifyCmd: next});
+}
+
+/* One shared "things to know", prepended to every project's mission. This is
+   the only place general house rules belong: a rules file inside a project
+   directory is invisible from here, so it cannot be steered. */
+async function editNotes() {
+  const current = (status.settings && status.settings.notes) || '';
+  const next = window.prompt(
+    'Things to know — applies to EVERY project.\n\nPrepended to each project\'s own mission prompt. Put house rules here, never in files inside a project.',
+    current);
+  if (next === null) return;
+  await doAction('/api/settings', {notes: next});
+}
+
+/* The mission prompt is the one surface a human edits. It used to be
+   write-once at creation, which is what pushed instructions into invisible
+   files inside the project. This edits the real thing, in place. */
+async function editPrompt(id) {
+  const p = (status.projects || []).find(x => x.id === id);
+  const current = (p && p.prompt) || '';
+  const next = window.prompt(
+    `Mission prompt for ${id}.\n\nThis is the only instruction every cycle reads. Edit it here, never in files inside the project.`,
+    current);
+  if (next === null) return;
+  if (!next.trim()) { alert('The prompt cannot be empty.'); return; }
+  await doAction(`/api/projects/${encodeURIComponent(id)}/config`, {prompt: next});
+}
+
+/* Last verify result, from the runner's own execution of verifyCmd - not from
+   anything a cycle claimed about itself. */
+function verifyBadge(p) {
+  const v = p.lastVerify;
+  if (!v) {
+    return p.verifyCmd
+      ? `<a class="inert" href="#" onclick="return false" title="gate set, has not run yet">verify: pending</a>`
+      : '';
+  }
+  const label = v.ok ? 'verify: pass' : `verify: FAIL (exit ${v.code == null ? '?' : v.code})`;
+  return `<a class="inert" href="#" onclick="return false" style="color:${v.ok ? '#4ADE80' : '#FF6B6B'}" title="${escapeHtml(v.cmd || '')}">${label}</a>`;
 }
 
 function renderProjectList() {
@@ -649,6 +704,7 @@ function renderProjectList() {
       <div class="p-links">
         <a class="inert" href="#" onclick="return false" title="dir: ${escapeHtml(p.dir)}">open dir</a>
         <a class="inert" href="#" onclick="return false" title="no diff-view endpoint yet">latest diff ${p.lastCommit ? escapeHtml(p.lastCommit) : ''}</a>
+        ${verifyBadge(p)}
       </div>
     </div>`).join('');
 
