@@ -116,7 +116,10 @@ test('load() fills project defaults', () => {
   assert.equal(p.enabled, true);
   assert.equal(p.model, 'claude-sonnet-5');
   assert.equal(p.maxCycleMinutes, 120);
-  assert.equal(p.criticRatio, 5);
+  // Default is 0: the critic reads the loop's own narration and tries to
+  // refute it, filing every discrepancy as backlog. Refutation always
+  // succeeds, so it manufactures endless low-value work. Opt in per project.
+  assert.equal(p.criticRatio, 0);
   assert.equal(p.reviewGateCycles, 0);
   assert.equal(p.containment, 'standard');
 });
@@ -170,7 +173,10 @@ test('addProject: applies defaults and honors overrides', () => {
   assert.equal(p.priority, 3);
   assert.equal(p.model, 'claude-haiku-4-5-20251001');
   assert.equal(p.maxCycleMinutes, 120);
-  assert.equal(p.criticRatio, 5);
+  // Default is 0: the critic reads the loop's own narration and tries to
+  // refute it, filing every discrepancy as backlog. Refutation always
+  // succeeds, so it manufactures endless low-value work. Opt in per project.
+  assert.equal(p.criticRatio, 0);
   assert.equal(p.reviewGateCycles, 0);
   assert.equal(p.containment, 'standard');
 });
@@ -263,7 +269,10 @@ test('I6: addProject rejects non-numeric priority/criticRatio/reviewGateCycles/m
     maxCycleMinutes: 'NaN-ish',
   });
   assert.equal(p.priority, 1, 'must fall back to the default priority, not store the garbage value');
-  assert.equal(p.criticRatio, 5);
+  // Default is 0: the critic reads the loop's own narration and tries to
+  // refute it, filing every discrepancy as backlog. Refutation always
+  // succeeds, so it manufactures endless low-value work. Opt in per project.
+  assert.equal(p.criticRatio, 0);
   assert.equal(p.reviewGateCycles, 0);
   assert.equal(p.maxCycleMinutes, 120);
 });

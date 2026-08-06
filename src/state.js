@@ -25,7 +25,14 @@ const PROJECT_DEFAULTS = {
   enabled: true,
   model: 'claude-sonnet-5',
   maxCycleMinutes: 120,
-  criticRatio: 5,
+  // Off by default. The critic reads the loop's own WORKLOG/UPDATES narration
+  // and tries to refute it, filing every discrepancy as backlog. Refutation
+  // always succeeds - every claim is incomplete somewhere - so it manufactures
+  // an endless supply of defensible, low-value work and rewards the very
+  // bookkeeping it needs as input. Measured on two real projects: 155 findings
+  // over 28 passes on one, and a self-audit cycle on a project whose entire
+  // prompt was three words. Opt in per project if you want it.
+  criticRatio: 0,
   reviewGateCycles: 0,
   containment: 'standard',
 };
