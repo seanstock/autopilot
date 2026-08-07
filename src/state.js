@@ -18,6 +18,10 @@ const DEFAULT_SETTINGS = {
   notes: '',
   webhook: null,
   port: 4680,
+  // Cycle slots (2026-08-07): how many cycles may run at once, across
+  // DIFFERENT projects (a single project is always one-at-a-time). 1 = the
+  // original serial behavior.
+  concurrency: 1,
 };
 
 const PROJECT_DEFAULTS = {

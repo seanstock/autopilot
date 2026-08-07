@@ -279,6 +279,7 @@
     <div class="controls">
       <div class="ctl-row"><span>ceiling</span><input type="range" id="ceil" min="10" max="100" value="75"><span class="val" id="ceilVal">75%</span></div>
       <div class="ctl-row"><span>grace</span><input type="number" id="grace" value="30" min="0"> <span>min</span></div>
+      <div class="ctl-row"><span>concurrency</span><input type="number" id="concurrency" value="1" min="1" max="8" title="cycle slots: how many cycles run at once across different projects (a single project is always one at a time)"> <span>slots</span></div>
       <button id="pauseBtn" onclick="togglePause()">Pause all</button>
       <button onclick="editNotes()" title="Notes prepended to every project mission">Universal Notes</button>
     </div>
@@ -625,6 +626,9 @@ function renderHeader() {
   document.getElementById('ceil').value = s.settings.ceilingPct;
   document.getElementById('ceilVal').textContent = s.settings.ceilingPct + '%';
   document.getElementById('grace').value = s.settings.graceMinutes;
+  if (s.settings.concurrency != null && document.activeElement !== document.getElementById('concurrency')) {
+    document.getElementById('concurrency').value = s.settings.concurrency;
+  }
 
   renderGauges();
 }
@@ -697,6 +701,9 @@ document.getElementById('ceil').addEventListener('input', function () {
 });
 document.getElementById('ceil').addEventListener('change', function () {
   doAction('/api/settings', { ceilingPct: +this.value });
+});
+document.getElementById('concurrency').addEventListener('change', function () {
+  doAction('/api/settings', { concurrency: +this.value });
 });
 document.getElementById('grace').addEventListener('change', function () {
   doAction('/api/settings', { graceMinutes: +this.value });
@@ -1123,8 +1130,10 @@ function renderDetailShell(loading, errorMsg) {
 
 function buildCycleRows(p) {
   const rows = [];
-  if (status.current && status.current.projectId === p.id) {
-    const c = status.current;
+  const liveCycle = (status.running || []).find(r => r.projectId === p.id)
+    || (status.current && status.current.projectId === p.id ? status.current : null);
+  if (liveCycle) {
+    const c = liveCycle;
     const minutes = ((Date.now() - new Date(c.startedIso).getTime()) / 60000).toFixed(1);
     rows.push(`<tr>
       <td class="num">${c.cycle}</td>

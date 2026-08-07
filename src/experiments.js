@@ -327,8 +327,10 @@ function deleteExperiment(scheduler, expId, deleteDirs, removeContainers) {
   const exp = experiments.find((e) => e.id === expId);
   if (!exp) return { ok: false, error: 'unknown experiment' };
 
-  const current = scheduler._current;
-  if (current && exp.variants.some((v) => v.projectId === current.projectId)) {
+  const midCycle = typeof scheduler.isMidCycle === 'function'
+    ? exp.variants.some((v) => scheduler.isMidCycle(v.projectId))
+    : false;
+  if (midCycle) {
     return { ok: false, error: 'a variant is mid-cycle; stop the experiment first' };
   }
 

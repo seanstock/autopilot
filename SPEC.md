@@ -94,9 +94,16 @@ disables).
 **Budget manager.** Owns the account-wide meter. Usage windows (5h/7d) are
 per-account, not per-project, so ALL projects share one budget. Scheduling
 rule: while every window is under `ceilingPct` and at least one project is
-runnable, run exactly one cycle at a time for the highest-priority runnable
-project. Round-robin among equal priorities. One cycle at a time, globally -
-parallel cycles double burn without doubling insight and wreck attribution.
+runnable, fill up to `settings.concurrency` cycle slots (default 1, max 8)
+from the highest-priority runnable projects. Round-robin among equal
+priorities. A single PROJECT is always one cycle at a time (its git repo and
+order queue are single-writer); concurrency > 1 interleaves cycles across
+different projects only (2026-08-07, added for experiments). The original
+rationale for serial - parallel cycles double burn without doubling insight
+and wreck attribution - still holds for exploratory missions; attribution
+stays correct either way (per-project events), but the ceiling check is
+per-tick, so N slots can overshoot the ceiling by up to N-1 cycles' spend.
+Default 1 preserves the original behavior exactly.
 
 **Cycle.** One fresh-context headless run: `claude -p <preamble + prompt>
 --model <m> --permission-mode acceptEdits --settings <generated profile>`,

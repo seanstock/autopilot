@@ -993,13 +993,13 @@ test('snapshot matches the shared status contract shape', async () => {
   });
 
   const snap = sched.snapshot();
-  assert.deepEqual(Object.keys(snap).sort(), ['budget', 'current', 'daemon', 'fatal', 'projects', 'settings', 'totals'].sort());
+  assert.deepEqual(Object.keys(snap).sort(), ['budget', 'concurrency', 'current', 'daemon', 'fatal', 'projects', 'running', 'settings', 'totals'].sort());
   assert.deepEqual(Object.keys(snap.daemon).sort(), ['pid', 'startedIso', 'version', 'paused'].sort());
   assert.deepEqual(Object.keys(snap.budget).sort(), ['ok', 'reason', 'checkedIso', 'windows'].sort());
   // 'notes' is the shared "things to know" prepended to every project's
   // mission. It rides in settings so the UI can edit it in one place.
   assert.deepEqual(Object.keys(snap.settings).sort(),
-    ['ceilingPct', 'graceMinutes', 'webhook', 'notes'].sort());
+    ['ceilingPct', 'graceMinutes', 'webhook', 'notes', 'concurrency'].sort());
 
   const p = snap.projects[0];
   for (const key of ['status', 'statusDetail', 'cycle', 'sinceReview', 'lastExit', 'lastCommit', 'lastVerify', 'pendingInject', 'totals', 'orders']) {
@@ -1225,4 +1225,128 @@ test('snapshot orders counts reflect a temp orders/ dir, null when orchestration
 
   assert.deepEqual(orchSnap.orders, { open: 2, inProgress: 1, done: 1, blocked: 1 });
   assert.equal(plainSnap.orders, null);
+});
+
+// ---------------------------------------------------------------------------
+// concurrency (2026-08-07): settings.concurrency cycle slots
+// ---------------------------------------------------------------------------
+
+test('concurrency 2 runs two different projects overlapped, never the same project twice', async () => {
+  const dirA = tempProjectDir();
+  const dirB = tempProjectDir();
+  const stateObj = makeStateObj([
+    makeProject({ id: 'proj-a', dir: dirA }),
+    makeProject({ id: 'proj-b', dir: dirB }),
+  ]);
+  stateObj.settings.concurrency = 2;
+
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const perProjectOverlap = new Set();
+  const running = new Set();
+  const sched = new Scheduler({
+    stateObj,
+    budget: makeBudget(),
+    notifyImpl: () => {},
+    tickMs: 10,
+    runCycleImpl: async ({ project }) => {
+      if (running.has(project.id)) perProjectOverlap.add(project.id);
+      running.add(project.id);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 120));
+      inFlight -= 1;
+      running.delete(project.id);
+      return cleanResult();
+    },
+  });
+
+  sched.start();
+  const overlapped = await waitUntil(() => maxInFlight >= 2, 3000);
+  await sched.stopDaemon();
+
+  assert.equal(overlapped, true, 'two cycles were in flight at once');
+  assert.equal(perProjectOverlap.size, 0, 'no project ever ran two cycles concurrently');
+});
+
+test('concurrency 1 (default) stays strictly serial', async () => {
+  const stateObj = makeStateObj([
+    makeProject({ id: 'proj-a', dir: tempProjectDir() }),
+    makeProject({ id: 'proj-b', dir: tempProjectDir() }),
+  ]);
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let cycles = 0;
+  const sched = new Scheduler({
+    stateObj,
+    budget: makeBudget(),
+    notifyImpl: () => {},
+    tickMs: 10,
+    runCycleImpl: async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 40));
+      inFlight -= 1;
+      cycles += 1;
+      return cleanResult();
+    },
+  });
+  sched.start();
+  await waitUntil(() => cycles >= 4, 3000);
+  await sched.stopDaemon();
+  assert.equal(maxInFlight, 1, 'never more than one cycle in flight');
+});
+
+test('updateSettings validates concurrency and snapshot reports running slots', () => {
+  const stateObj = makeStateObj([makeProject({ id: 'proj-a', dir: tempProjectDir() })]);
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), notifyImpl: () => {}, tickMs: 999999 });
+
+  sched.updateSettings({ concurrency: 3 });
+  assert.equal(stateObj.settings.concurrency, 3);
+  sched.updateSettings({ concurrency: 'nope' });
+  assert.equal(stateObj.settings.concurrency, 3, 'invalid value ignored');
+  sched.updateSettings({ concurrency: 99 });
+  assert.equal(stateObj.settings.concurrency, 3, 'out-of-range ignored');
+
+  sched._running.set('proj-a', { projectId: 'proj-a', cycle: 2, kind: 'work', startedIso: util.nowIso() });
+  const snap = sched.snapshot();
+  assert.equal(snap.concurrency, 3);
+  assert.equal(snap.running.length, 1);
+  assert.equal(snap.current.projectId, 'proj-a', 'current stays populated for compat');
+  const p = snap.projects.find((x) => x.id === 'proj-a');
+  assert.equal(p.status, 'running');
+  assert.match(p.statusDetail, /cycle 2 \(work\)/);
+});
+
+test('stopDaemon waits for ALL concurrent cycles and STOPs each running project', async () => {
+  const dirs = [tempProjectDir(), tempProjectDir()];
+  const stateObj = makeStateObj([
+    makeProject({ id: 'proj-a', dir: dirs[0] }),
+    makeProject({ id: 'proj-b', dir: dirs[1] }),
+  ]);
+  stateObj.settings.concurrency = 2;
+
+  let started = 0;
+  let finished = 0;
+  const sched = new Scheduler({
+    stateObj,
+    budget: makeBudget(),
+    notifyImpl: () => {},
+    tickMs: 10,
+    runCycleImpl: async () => {
+      started += 1;
+      await new Promise((r) => setTimeout(r, 300));
+      finished += 1;
+      return cleanResult();
+    },
+  });
+  sched.start();
+  await waitUntil(() => started >= 2, 3000);
+  await sched.stopDaemon();
+
+  assert.equal(finished >= 2, true, 'stopDaemon returned only after both in-flight cycles finished');
+  assert.equal(sched._running.size, 0, 'no cycles left registered');
+  for (const dir of dirs) {
+    assert.equal(fs.existsSync(path.join(dir, '.autopilot', 'STOP')), false, `shutdown STOP cleaned up in ${dir}`);
+  }
 });

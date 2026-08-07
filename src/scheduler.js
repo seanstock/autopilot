@@ -1,16 +1,24 @@
 'use strict';
 
 // Scheduler: the daemon's main loop. Owns priorities, gates, budget-driven
-// sleep, grace, and the one-cycle-at-a-time invariant. Zero npm
-// dependencies, Node built-ins only, CommonJS.
+// sleep, grace, and the cycle-slot invariant. Zero npm dependencies, Node
+// built-ins only, CommonJS.
 //
-// The loop is a single async chain (start() kicks off _tick(), which
-// awaits _tickOnce() to completion before scheduling the next _tick() via
-// setTimeout). Because the entire cycle run (runCycleImpl) is awaited
-// in-line inside _tickOnce(), there is no code path by which two cycles
-// can be in flight at once - the "one cycle at a time, globally" rule
-// (SPEC.md section 2) falls out of the control flow shape rather than
-// needing a separate lock.
+// Concurrency (2026-08-07, user directive): settings.concurrency (default
+// 1, max 8) is the number of cycle slots. The tick loop launches cycles
+// WITHOUT awaiting them, up to the slot count, and tracks them in
+// this._running (projectId -> info) + this._cyclePromises. Two invariants
+// survive from the original serial design: a given PROJECT never has two
+// cycles in flight (its git repo and order queue are single-writer - the
+// runnable computation excludes running projects), and every global gate
+// (FATAL, pause, budget, grace) stops NEW launches only; in-flight cycles
+// always finish under their own STOP/usage-limit handling, exactly as an
+// in-flight cycle behaved under the serial loop. With concurrency 1 the
+// behavior is byte-identical to the original one-cycle-at-a-time loop.
+// The budget ceiling check runs per tick, so N concurrent cycles can
+// overshoot the ceiling by up to N-1 cycles' spend before the next check
+// bites - the default 75% ceiling headroom absorbs this; raising
+// concurrency while running at a 95%+ ceiling is on the user.
 //
 // Precedence (docs/plans/2026-07-23-autopilot-build.md, Task 6): the FATAL
 // latch is checked FIRST, before pause, before budget, before any
@@ -243,7 +251,8 @@ class Scheduler extends EventEmitter {
     this._stopped = true;
     this._timer = null;
 
-    this._current = null; // {projectId, cycle, kind, startedIso} | null
+    this._running = new Map(); // projectId -> {projectId, cycle, kind, startedIso}
+    this._cyclePromises = new Set(); // in-flight _runOneCycle chains (launch wrappers)
     this._lastBudget = { ok: true, reason: null, checkedIso: null, windows: [] };
     this._budgetWasOk = null; // null = not yet observed, then true/false
     this._effectiveBudgetOk = true; // budget.check() ok, possibly rescued by probeGate
@@ -310,50 +319,63 @@ class Scheduler extends EventEmitter {
     }
   }
 
+  // Concurrency-aware shutdown: every project with a cycle in flight gets a
+  // STOP file (the runner's own kill-path), then we wait for ALL in-flight
+  // cycle chains (plus any tick) up to the deadline. STOP files we created
+  // are removed for projects whose cycles actually finished; a project whose
+  // cycle is still alive at the deadline keeps its STOP (NEW-2, unchanged).
   async _waitForInFlightCycle() {
-    if (!this._currentTickPromise) return;
+    if (!this._currentTickPromise && this._cyclePromises.size === 0) return;
 
     const deadline = Date.now() + SHUTDOWN_GRACE_MS;
-    let stoppedDir = null;
+    const stoppedDirs = new Set(); // dirs whose STOP file WE created
 
-    while (this._currentTickPromise && Date.now() < deadline) {
-      if (this._current && !stoppedDir) {
-        const project = state.getProject(this.stateObj, this._current.projectId);
-        if (project) {
-          try {
-            util.ensureDir(util.projectMeta(project.dir));
-            const stopPath = stopFilePath(project.dir);
-            if (!fs.existsSync(stopPath)) {
-              fs.writeFileSync(stopPath, '');
-              stoppedDir = project.dir;
-            }
-          } catch (err) {
-            util.log('scheduler: shutdown STOP write failed for', project.id, String(err && err.message));
+    while ((this._currentTickPromise || this._cyclePromises.size > 0) && Date.now() < deadline) {
+      for (const info of this._running.values()) {
+        const project = state.getProject(this.stateObj, info.projectId);
+        if (!project || stoppedDirs.has(project.dir)) continue;
+        try {
+          util.ensureDir(util.projectMeta(project.dir));
+          const stopPath = stopFilePath(project.dir);
+          if (!fs.existsSync(stopPath)) {
+            fs.writeFileSync(stopPath, '');
+            stoppedDirs.add(project.dir);
           }
+        } catch (err) {
+          util.log('scheduler: shutdown STOP write failed for', project.id, String(err && err.message));
         }
       }
 
       const remaining = Math.max(0, deadline - Date.now());
+      const pending = [...this._cyclePromises];
+      if (this._currentTickPromise) pending.push(this._currentTickPromise);
       try {
-        await Promise.race([this._currentTickPromise, new Promise((resolve) => setTimeout(resolve, Math.min(200, remaining)))]);
+        await Promise.race([Promise.all(pending), new Promise((resolve) => setTimeout(resolve, Math.min(200, remaining)))]);
       } catch (err) {
-        // the tick promise itself never rejects (_tick catches internally);
-        // nothing to do either way.
+        // cycle chains and the tick promise never reject (both catch
+        // internally); nothing to do either way.
       }
     }
 
-    if (stoppedDir && !this._currentTickPromise) {
-      try {
-        fs.unlinkSync(stopFilePath(stoppedDir));
-      } catch (err) {
-        // best effort - already gone, or never existed
+    const stillRunningDirs = new Set();
+    for (const info of this._running.values()) {
+      const project = state.getProject(this.stateObj, info.projectId);
+      if (project) stillRunningDirs.add(project.dir);
+    }
+    for (const dir of stoppedDirs) {
+      if (stillRunningDirs.has(dir)) {
+        // NEW-2: shutdown deadline hit with this cycle still in flight. The
+        // STOP file is the last brake on that possibly-orphaned child (its
+        // guard blocks every tool call while STOP exists), so leave it in
+        // place; the human clears it by starting the project again.
+        util.log('scheduler: shutdown timed out with a cycle still in flight; leaving STOP in place for', dir);
+      } else {
+        try {
+          fs.unlinkSync(stopFilePath(dir));
+        } catch (err) {
+          // best effort - already gone, or never existed
+        }
       }
-    } else if (stoppedDir) {
-      // NEW-2: shutdown deadline hit with the cycle still in flight. The
-      // STOP file is the last brake on that possibly-orphaned child (its
-      // guard blocks every tool call while STOP exists), so leave it in
-      // place; the human clears it by starting the project again.
-      util.log('scheduler: shutdown timed out with a cycle still in flight; leaving STOP in place for', stoppedDir);
     }
   }
 
@@ -384,7 +406,6 @@ class Scheduler extends EventEmitter {
     // 1. FATAL latch, checked first, before anything else (see file header).
     const fatal = state.readFatal();
     if (fatal) {
-      this._current = null;
       this._effectiveBudgetOk = false;
       this._emitStatusIfChanged();
       return;
@@ -392,7 +413,6 @@ class Scheduler extends EventEmitter {
 
     // 2. Global pause.
     if (this.paused) {
-      this._current = null;
       this._emitStatusIfChanged();
       return;
     }
@@ -446,7 +466,6 @@ class Scheduler extends EventEmitter {
       this._budgetWasOk = false;
       this._effectiveBudgetOk = false;
       this._inGrace = false;
-      this._current = null;
       this._emitStatusIfChanged();
       return;
     }
@@ -485,29 +504,49 @@ class Scheduler extends EventEmitter {
 
     if (this._graceUntil && Date.now() < this._graceUntil) {
       this._inGrace = true;
-      this._current = null;
       this._emitStatusIfChanged();
       return;
     }
     this._graceUntil = 0;
     this._inGrace = false;
 
-    // 4. Pick a runnable project.
-    const runnable = this._computeRunnable();
-    if (runnable.length === 0) {
-      this._current = null;
-      this._emitStatusIfChanged();
-      return;
+    // 4/5. Fill free cycle slots. Launches are NOT awaited: each cycle
+    // chain tracks itself in _running/_cyclePromises and the tick returns
+    // as soon as the slots are full (or nothing is runnable). Runnable is
+    // recomputed after each launch so a just-launched project is excluded.
+    const slots = this._concurrency();
+    while (this._running.size < slots) {
+      const runnable = this._computeRunnable();
+      if (runnable.length === 0) break;
+
+      const minPriority = Math.min(...runnable.map((r) => r.project.priority));
+      const tier = runnable.filter((r) => r.project.priority === minPriority);
+      const picked = this._pickFromTier(tier);
+      this._lastPickedId = picked.project.id;
+      this._launchCycle(picked.project, picked.runtime);
     }
-
-    const minPriority = Math.min(...runnable.map((r) => r.project.priority));
-    const tier = runnable.filter((r) => r.project.priority === minPriority);
-    const picked = this._pickFromTier(tier);
-    this._lastPickedId = picked.project.id;
-
-    // 5. Run it.
-    await this._runOneCycle(picked.project, picked.runtime);
     this._emitStatusIfChanged();
+  }
+
+  _concurrency() {
+    const raw = Number(this.stateObj.settings && this.stateObj.settings.concurrency);
+    if (!Number.isInteger(raw)) return 1;
+    return Math.max(1, Math.min(8, raw));
+  }
+
+  // Fire-and-track a cycle chain. The chain itself (via _runOneCycle) owns
+  // its _running entry; this wrapper only guards the scheduler loop against
+  // a throw and maintains the promise set used by shutdown.
+  _launchCycle(project, runtime) {
+    const chain = this._runOneCycle(project, runtime)
+      .catch((err) => {
+        util.log('scheduler: cycle chain threw (contract violation)', String((err && err.stack) || err));
+      })
+      .finally(() => {
+        this._cyclePromises.delete(chain);
+        this._emitStatusIfChanged();
+      });
+    this._cyclePromises.add(chain);
   }
 
   _computeRunnable() {
@@ -515,6 +554,9 @@ class Scheduler extends EventEmitter {
     const runnable = [];
     for (const project of this.stateObj.projects || []) {
       if (!project.enabled) continue;
+      // A project never has two cycles in flight (single-writer git repo /
+      // order queue); with concurrency > 1 other projects fill the slots.
+      if (this._running.has(project.id)) continue;
       if (fs.existsSync(stopFilePath(project.dir))) continue;
 
       const runtime = state.readRuntime(project.dir);
@@ -646,7 +688,7 @@ class Scheduler extends EventEmitter {
     // the backfill would double-count it.
     this._ensureTotals(project, runtime);
 
-    this._current = { projectId: project.id, cycle: cycleNumber, kind, startedIso: util.nowIso() };
+    this._running.set(project.id, { projectId: project.id, cycle: cycleNumber, kind, startedIso: util.nowIso() });
     this._emitStatusIfChanged();
 
     try {
@@ -761,7 +803,7 @@ class Scheduler extends EventEmitter {
       lastCommit: result.commit,
       lastVerify: result.verify != null ? result.verify : null,
     };
-    this._current = null;
+    this._running.delete(project.id);
 
     // Cap summary (user directive 2026-07-23): when a chain dies of usage
     // exhaustion, its per-checkpoint UPDATES entries can still end
@@ -807,7 +849,8 @@ class Scheduler extends EventEmitter {
       project.reviewGateCycles > 0 &&
       runtime.sinceReview >= project.reviewGateCycles &&
       !fs.existsSync(reviewedFilePath(project.dir));
-    const isCurrent = !!(this._current && this._current.projectId === project.id);
+    const runningInfo = this._running.get(project.id) || null;
+    const isCurrent = !!runningInfo;
 
     const atCap = project.maxCycles > 0 && runtime.cycle >= project.maxCycles;
 
@@ -827,7 +870,7 @@ class Scheduler extends EventEmitter {
       statusDetail = `cooldown until ${runtime.cooldownUntil}`;
     } else if (isCurrent) {
       status = 'running';
-      statusDetail = `cycle ${this._current.cycle} (${this._current.kind})`;
+      statusDetail = `cycle ${runningInfo.cycle} (${runningInfo.kind})`;
     } else if (this.paused || !this._effectiveBudgetOk || this._inGrace) {
       status = 'sleeping';
       statusDetail = this.paused
@@ -931,8 +974,13 @@ class Scheduler extends EventEmitter {
         graceMinutes: this.stateObj.settings.graceMinutes,
         webhook: this.stateObj.settings.webhook,
         notes: this.stateObj.settings.notes || '',
+        concurrency: this._concurrency(),
       },
-      current: fatalRecord ? null : this._current,
+      // `current` is kept for UI/API compat: the oldest in-flight cycle, or
+      // null. `running` is the full slot list (concurrency-aware).
+      current: fatalRecord ? null : (this._running.values().next().value || null),
+      running: fatalRecord ? [] : [...this._running.values()],
+      concurrency: this._concurrency(),
       totals: (() => {
         const g = emptyTotals();
         for (const p of projects) {
@@ -1135,8 +1183,12 @@ class Scheduler extends EventEmitter {
   // Deregister a project. Refuses while it is mid-cycle: the runner holds the
   // directory and would keep writing to a project the registry no longer knows
   // about. Never touches the directory itself.
+  isMidCycle(id) {
+    return this._running.has(id);
+  }
+
   removeProject(id) {
-    if (this._current && this._current.projectId === id) return false;
+    if (this._running.has(id)) return false;
     const removed = state.removeProject(this.stateObj, id);
     if (!removed) return false;
     state.save(this.stateObj);
@@ -1145,7 +1197,16 @@ class Scheduler extends EventEmitter {
   }
 
   updateSettings(patch) {
-    Object.assign(this.stateObj.settings, patch || {});
+    const clean = Object.assign({}, patch || {});
+    // concurrency is a live scheduler knob: validated here (int 1..8; the
+    // getter clamps again defensively). Lowering it never kills in-flight
+    // cycles - slots drain naturally as cycles finish.
+    if (Object.prototype.hasOwnProperty.call(clean, 'concurrency')) {
+      const n = Number(clean.concurrency);
+      if (!Number.isInteger(n) || n < 1 || n > 8) delete clean.concurrency;
+      else clean.concurrency = n;
+    }
+    Object.assign(this.stateObj.settings, clean);
     state.save(this.stateObj);
     this._emitStatusIfChanged();
     return this.stateObj.settings;

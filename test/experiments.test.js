@@ -405,7 +405,9 @@ test('deleteExperiment refuses when a variant is mid-cycle', () => {
   const body = basicBody({ variants: [{ label: 'a', overrides: {}, promptSuffix: '' }] });
   const record = experiments.createExperiment(sched, body);
 
-  sched._current = { projectId: record.variants[0].projectId, cycle: 1, kind: 'work', startedIso: util.nowIso() };
+  sched._running.set(record.variants[0].projectId, {
+    projectId: record.variants[0].projectId, cycle: 1, kind: 'work', startedIso: util.nowIso(),
+  });
 
   const result = experiments.deleteExperiment(sched, record.id, true);
   assert.equal(result.ok, false);
