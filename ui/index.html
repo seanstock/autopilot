@@ -221,7 +221,7 @@
   .inj-text { font-size: 13px; white-space: pre-wrap; }
 
   /* ---------- Experiments ---------- */
-  .exp-section { margin-top: 32px; }
+  .exp-section { margin-bottom: 32px; }
   .exp-card table { margin-top: 4px; }
   .exp-card .m-actions, .exp-card .cfg-actions { margin-top: 12px; }
   .modal.wide { width: 820px; }
@@ -235,8 +235,21 @@
 
   footer { margin-top: 32px; display: flex; gap: 16px; font-size: 11px; color: #555; font-family: var(--font-mono); }
   footer a { border: none; color: #555; } footer a:hover { color: var(--text-secondary); }
-  ::-webkit-scrollbar { width: 8px; } ::-webkit-scrollbar-thumb { background: var(--surface-2); border-radius: 4px; }
+  /* Visible, always-present scrollbars. The old 8px thumb in --surface-2
+     (#242424 on #111) was invisible against the dark bg, and Windows 11
+     overlay scrollbars auto-hide on top of that - the page scrolled but
+     looked unscrollable. Explicit sizes force classic (non-overlay)
+     scrollbars in Chromium; html overflow-y:scroll always reserves the
+     gutter so long pages visibly ARE long. */
+  html { overflow-y: scroll; }
+  ::-webkit-scrollbar { width: 12px; height: 12px; }
+  ::-webkit-scrollbar-thumb { background: #3f3f3f; border-radius: 6px; border: 3px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: #555; }
   ::-webkit-scrollbar-track { background: transparent; }
+  html[data-theme="light"] ::-webkit-scrollbar-thumb { background: #c9c9c5; border-color: var(--bg); }
+  html[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #b0b0ac; }
+  * { scrollbar-width: thin; scrollbar-color: #3f3f3f transparent; } /* Firefox */
+  html[data-theme="light"] * { scrollbar-color: #c9c9c5 transparent; }
 </style>
 </head>
 <body>
@@ -271,6 +284,14 @@
     </div>
   </header>
 
+  <div class="exp-section">
+    <div class="plist-head">
+      <h2>Experiments</h2>
+      <button class="primary" onclick="openExpModal()">+ New Experiment</button>
+    </div>
+    <div id="expList"></div>
+  </div>
+
   <div class="main" id="main">
     <div>
       <div class="plist-head">
@@ -281,14 +302,6 @@
     </div>
 
     <div class="detail" id="detail"></div>
-  </div>
-
-  <div class="exp-section">
-    <div class="plist-head">
-      <h2>Experiments</h2>
-      <button class="primary" onclick="openExpModal()">+ New Experiment</button>
-    </div>
-    <div id="expList"></div>
   </div>
 
   <footer>
