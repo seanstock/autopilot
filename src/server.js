@@ -308,7 +308,20 @@ function startServer({ scheduler, port }) {
       }
     }
 
-    let em = pathname.match(/^\/api\/experiments\/([^/]+)\/(stop|start)$/);
+    let em = pathname.match(/^\/api\/experiments\/([^/]+)\/variants$/);
+    if (em && method === 'POST') {
+      const body = await readJsonBody(req);
+      try {
+        const variant = experiments.addVariant(scheduler, em[1], body);
+        return sendJson(res, 200, { variant, experiments: experiments.listExperiments(scheduler) });
+      } catch (err) {
+        const status = err && err.status === 400 ? 400 : 500;
+        if (status === 500) util.log('server: addVariant failed', String((err && err.stack) || err));
+        return sendJson(res, status, { error: String((err && err.message) || 'add variant failed') });
+      }
+    }
+
+    em = pathname.match(/^\/api\/experiments\/([^/]+)\/(stop|start)$/);
     if (em && method === 'POST') {
       const ok = experiments.fanOut(scheduler, em[1], em[2]);
       if (!ok) return sendJson(res, 404, { error: 'unknown experiment' });

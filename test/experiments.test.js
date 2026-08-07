@@ -671,3 +671,70 @@ test('deleteExperiment with removeContainers runs docker teardown for server exp
   assert.equal(experiments.loadExperiments().length, 0);
   assert.equal(sched.stateObj.projects.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// addVariant: late additions to an existing experiment
+// ---------------------------------------------------------------------------
+
+test('addVariant inherits basePrompt/cap/defaults, leases the next port, templates placeholders', () => {
+  tempHome();
+  tempExperimentsRoot();
+  const sched = makeScheduler();
+  const record = experiments.createExperiment(
+    sched,
+    basicBody({
+      portBase: 8400,
+      basePrompt: 'Run on {{PORT}} as {{CONTAINER}}.',
+      cycleCap: 3,
+      defaults: { model: 'claude-sonnet-5', verifyCmd: 'curl http://127.0.0.1:{{PORT}}/healthz' },
+      variants: [{ label: 'a', overrides: {}, promptSuffix: '' }],
+    })
+  );
+
+  const v = experiments.addVariant(sched, record.id, {
+    label: 'new-model',
+    overrides: { model: 'claude-opus-5' },
+  });
+
+  assert.equal(v.port, 8401, 'next port in the lease block');
+  assert.equal(v.container, `exp-${record.id}-new-model`);
+  const p = state.getProject(sched.stateObj, v.projectId);
+  assert.equal(p.model, 'claude-opus-5', 'explicit override wins');
+  assert.equal(p.verifyCmd, 'curl http://127.0.0.1:8401/healthz', 'default verifyCmd inherited + templated');
+  assert.equal(p.prompt, `Run on 8401 as exp-${record.id}-new-model.`);
+  assert.equal(p.maxCycles, 3, 'cap inherited');
+  assert.equal(p.experimentId, record.id);
+  assert.ok(fs.existsSync(path.join(experiments.experimentsRoot(), record.id, 'new-model', '.git')));
+
+  const listed = experiments.listExperiments(sched).find((e) => e.id === record.id);
+  assert.equal(listed.variants.length, 2);
+  assert.equal(listed.complete, false, 'newcomer at 0 cycles reopens the experiment');
+});
+
+test('addVariant uniquifies clashing labels and rejects unknown experiments', () => {
+  tempHome();
+  tempExperimentsRoot();
+  const sched = makeScheduler();
+  const record = experiments.createExperiment(sched, basicBody({ variants: [{ label: 'a', overrides: {}, promptSuffix: '' }] }));
+
+  const v = experiments.addVariant(sched, record.id, { label: 'a', overrides: {} });
+  assert.equal(v.label, 'a-2');
+  assert.equal(v.port, null, 'static experiment stays portless');
+
+  assert.throws(() => experiments.addVariant(sched, 'nope', {}), (err) => err.status === 400);
+});
+
+test('addVariant rolls back on failure and leaves the experiment untouched', () => {
+  tempHome();
+  const root = tempExperimentsRoot();
+  const sched = makeScheduler();
+  const record = experiments.createExperiment(sched, basicBody({ variants: [{ label: 'a', overrides: {}, promptSuffix: '' }] }));
+
+  // Pre-create the target dir so addVariant fails its existence check.
+  fs.mkdirSync(path.join(root, record.id, 'boom'), { recursive: true });
+  assert.throws(() => experiments.addVariant(sched, record.id, { label: 'boom' }), (err) => err.status === 400);
+
+  assert.equal(sched.stateObj.projects.length, 1, 'no project added');
+  const listed = experiments.getExperiment(record.id);
+  assert.equal(listed.variants.length, 1, 'record unchanged');
+});

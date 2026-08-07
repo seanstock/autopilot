@@ -194,6 +194,10 @@ function createExperiment(scheduler, body) {
     basePrompt,
     cycleCap,
     portBase,
+    // Stored so a late-added variant (addVariant) can inherit the same
+    // experiment-wide defaults the original rows got. Experiments created
+    // before this field existed simply have no defaults to inherit.
+    defaults,
     created: util.nowIso(),
     variants: prepared.map((v) => ({
       label: v.label,
@@ -207,6 +211,81 @@ function createExperiment(scheduler, body) {
   experiments.push(record);
   saveExperiments(experiments);
   return record;
+}
+
+// Add one variant to an existing experiment - the "a new model came out"
+// path. Inherits the experiment's basePrompt, cycleCap, stored defaults and
+// (for server experiments) the next port in the lease block
+// (portBase + variants.length). Same rollback discipline as creation:
+// experiments.json is written last.
+// body: { label?, promptSuffix?, overrides?: {model,...} }
+function addVariant(scheduler, expId, body) {
+  const experiments = loadExperiments();
+  const exp = experiments.find((e) => e.id === expId);
+  if (!exp) throw badRequest('unknown experiment');
+  if (exp.variants.length >= 20) throw badRequest('experiment already has 20 variants');
+
+  const b = body && typeof body === 'object' ? body : {};
+  const defaults = exp.defaults && typeof exp.defaults === 'object' ? exp.defaults : {};
+  const taken = new Set(exp.variants.map((v) => v.label));
+  const label = uniqueSlug(slug(b.label) || `variant-${exp.variants.length + 1}`, taken);
+
+  const overrides = {};
+  const src = b.overrides && typeof b.overrides === 'object' ? b.overrides : {};
+  for (const key of OVERRIDE_KEYS) {
+    const value = src[key] !== undefined && src[key] !== '' ? src[key] : defaults[key];
+    if (value !== undefined && value !== '') overrides[key] = value;
+  }
+  const promptSuffix = typeof b.promptSuffix === 'string' ? b.promptSuffix.trim() : '';
+
+  const variant = { label, overrides, promptSuffix, port: null, container: null };
+  if (exp.portBase != null) {
+    variant.port = exp.portBase + exp.variants.length;
+    variant.container = `exp-${exp.id}-${label}`;
+    const vars = { port: variant.port, label, container: variant.container };
+    if (variant.overrides.verifyCmd) variant.overrides.verifyCmd = applyTemplate(variant.overrides.verifyCmd, vars);
+  }
+
+  const dir = path.join(experimentsRoot(), exp.id, label);
+  if (fs.existsSync(dir)) throw badRequest(`directory already exists: ${dir}`);
+
+  let projectId = null;
+  try {
+    util.ensureDir(dir);
+    gitInit(dir);
+
+    let prompt = promptSuffix ? `${exp.basePrompt}\n\n${promptSuffix}` : exp.basePrompt;
+    if (variant.port !== null) {
+      prompt = applyTemplate(prompt, { port: variant.port, label, container: variant.container });
+    }
+    const project = scheduler.addProject(Object.assign({ dir, prompt, enabled: true }, variant.overrides));
+    projectId = project.id;
+    variant.projectId = projectId;
+
+    scheduler.updateProject(projectId, { maxCycles: exp.cycleCap });
+    const entry = scheduler.stateObj.projects.find((p) => p.id === projectId);
+    entry.experimentId = exp.id;
+    entry.experimentLabel = label;
+    scheduler.updateSettings({});
+  } catch (err) {
+    if (projectId) {
+      try {
+        scheduler.removeProject(projectId);
+      } catch (e2) {
+        // best effort rollback
+      }
+    }
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (e2) {
+      // best effort rollback
+    }
+    throw err;
+  }
+
+  exp.variants.push(variant);
+  saveExperiments(experiments);
+  return variant;
 }
 
 function uniqueSlug(base, taken) {
@@ -404,6 +483,7 @@ module.exports = {
   saveExperiments,
   getExperiment,
   createExperiment,
+  addVariant,
   listExperiments,
   fanOut,
   deleteExperiment,

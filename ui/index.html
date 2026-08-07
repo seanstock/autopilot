@@ -169,8 +169,8 @@
   .plan .box.tick { color: var(--success); }
 
   /* ---------- Modal ---------- */
-  #modalBg, #expModalBg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 10; }
-  #modalBg.on, #expModalBg.on { display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; }
+  #modalBg, #expModalBg, #addVarBg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 10; }
+  #modalBg.on, #expModalBg.on, #addVarBg.on { display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; }
   .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; width: 520px; max-width: 92vw; max-height: 84vh; overflow-y: auto; }
   .modal h3 { font-size: 20px; font-weight: 600; margin-bottom: 16px; }
   .frow { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
@@ -347,6 +347,23 @@
       </div>
       <div class="contain-warn" id="cwarn">Containment off: no guard hook, no deny rules. API key stripping still applies.</div>
       <div class="m-actions"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="submit" class="primary">Add &amp; start</button></div>
+    </form>
+  </div>
+</div>
+
+<div id="addVarBg" onclick="if(event.target===this)closeAddVariantModal()">
+  <div class="modal">
+    <h3>Add variant <span class="sub" id="av-exp"></span></h3>
+    <div id="avError" style="display:none"></div>
+    <form id="avForm" onsubmit="submitAddVariant(event)">
+      <div class="frow"><label>Label</label><input type="text" id="av-label" placeholder="e.g. new-model"></div>
+      <div class="frow"><label>Model</label><input type="text" id="av-model" placeholder="inherit experiment default"></div>
+      <div class="frow"><label>Worker model</label><input type="text" id="av-worker" placeholder="inherit"></div>
+      <div class="frow"><label>Effort</label>
+        <select id="av-effort"><option value="">inherit</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select>
+      </div>
+      <div class="frow"><label>Prompt suffix</label><input type="text" id="av-suffix" placeholder="optional"></div>
+      <div class="m-actions"><button type="button" class="ghost" onclick="closeAddVariantModal()">Cancel</button><button type="submit" class="primary">Add &amp; start</button></div>
     </form>
   </div>
 </div>
@@ -1433,6 +1450,7 @@ function renderExpCard(exp) {
       </table>
       <div class="cfg-actions">
         <span class="cfg-note"></span>
+        <button onclick="openAddVariantModal('${escapeHtml(exp.id)}')">+ Add variant</button>
         <button onclick="expStopAll('${escapeHtml(exp.id)}')">Stop All</button>
         <button onclick="expStartAll('${escapeHtml(exp.id)}')">Start All</button>
         <button onclick="deleteExperimentConfirm('${escapeHtml(exp.id)}')">Delete</button>
@@ -1446,6 +1464,62 @@ function renderExperiments() {
   el.innerHTML = experiments.length
     ? experiments.map(renderExpCard).join('')
     : '<div class="empty-note">(no experiments yet)</div>';
+}
+
+/* ---- Add-variant modal ---- */
+let addVarExpId = null;
+
+function openAddVariantModal(expId) {
+  addVarExpId = expId;
+  document.getElementById('avForm').reset();
+  document.getElementById('av-exp').textContent = expId;
+  const err = document.getElementById('avError');
+  err.style.display = 'none';
+  err.textContent = '';
+  document.getElementById('addVarBg').classList.add('on');
+}
+
+function closeAddVariantModal() {
+  document.getElementById('addVarBg').classList.remove('on');
+  addVarExpId = null;
+}
+
+async function submitAddVariant(ev) {
+  ev.preventDefault();
+  const err = document.getElementById('avError');
+  err.style.display = 'none';
+  const overrides = {};
+  const model = document.getElementById('av-model').value.trim();
+  const worker = document.getElementById('av-worker').value.trim();
+  const effort = document.getElementById('av-effort').value;
+  if (model) overrides.model = model;
+  if (worker) overrides.workerModel = worker;
+  if (effort) overrides.effort = effort;
+  const body = { overrides };
+  const label = document.getElementById('av-label').value.trim();
+  const suffix = document.getElementById('av-suffix').value.trim();
+  if (label) body.label = label;
+  if (suffix) body.promptSuffix = suffix;
+
+  try {
+    if (isMock) { console.log('[mock] add variant (no-op)', addVarExpId, body); closeAddVariantModal(); return; }
+    const res = await fetch('/api/experiments/' + encodeURIComponent(addVarExpId) + '/variants', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      let msg = 'request failed: ' + res.status;
+      try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (e) {}
+      err.textContent = msg;
+      err.style.display = 'block';
+      return;
+    }
+    const data = await res.json();
+    if (data && data.experiments) { experiments = data.experiments; renderExperiments(); }
+    closeAddVariantModal();
+  } catch (e) {
+    err.textContent = e.message;
+    err.style.display = 'block';
+  }
 }
 
 /* ---- New Experiment modal ---- */
