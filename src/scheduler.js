@@ -518,6 +518,28 @@ class Scheduler extends EventEmitter {
       if (fs.existsSync(stopFilePath(project.dir))) continue;
 
       const runtime = state.readRuntime(project.dir);
+
+      // Cycle cap (experiments spec 2026-08-07): runtime.cycle is the
+      // persisted, crash-safe counter (only incremented after cycle_end),
+      // so the cap can never over-run across restarts. At cap: disable the
+      // project, stamp variant_complete once, and never dispatch again.
+      if (project.maxCycles > 0 && runtime.cycle >= project.maxCycles) {
+        if (project.enabled) {
+          project.enabled = false;
+          state.save(this.stateObj);
+          try {
+            events.appendEvent(project.dir, project.id, 'variant_complete', {
+              cycles: runtime.cycle,
+              maxCycles: project.maxCycles,
+            });
+            events.activity(project.dir, `cycle cap reached (${runtime.cycle}/${project.maxCycles}); variant complete`, 'daemon');
+          } catch (err) {
+            // best effort
+          }
+        }
+        continue;
+      }
+
       if (runtime.cooldownUntil && Date.parse(runtime.cooldownUntil) > now) continue;
 
       if (project.reviewGateCycles > 0 && runtime.sinceReview >= project.reviewGateCycles) {
@@ -787,9 +809,14 @@ class Scheduler extends EventEmitter {
       !fs.existsSync(reviewedFilePath(project.dir));
     const isCurrent = !!(this._current && this._current.projectId === project.id);
 
+    const atCap = project.maxCycles > 0 && runtime.cycle >= project.maxCycles;
+
     let status;
     let statusDetail;
-    if (stopped) {
+    if (atCap) {
+      status = 'complete';
+      statusDetail = `cycle cap reached (${runtime.cycle}/${project.maxCycles})`;
+    } else if (stopped) {
       status = 'stopped';
       statusDetail = project.enabled ? 'STOP file present' : 'disabled';
     } else if (inReview) {

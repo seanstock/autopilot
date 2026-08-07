@@ -189,6 +189,88 @@ async function main() {
   fs.writeFileSync(path.join(proj2, '.autopilot', 'STOP'), '');
   await new Promise((r) => setTimeout(r, 500));
 
+  // --- experiments leg: 2-variant experiment, cycleCap 1, via the real API,
+  // driven by the fake-claude runner (token-free) ---
+  const expRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-e2e-exp-root-'));
+  process.env.AUTOPILOT_EXPERIMENTS_DIR_OVERRIDE = expRoot;
+
+  const post = (p, body) => new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body || {});
+    const req = http.request(
+      { host: '127.0.0.1', port, path: p, method: 'POST', headers: { Host: '127.0.0.1:' + port, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } },
+      (res) => {
+        let b = '';
+        res.on('data', (c) => (b += c));
+        res.on('end', () => resolve({ status: res.statusCode, body: b }));
+      }
+    );
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+
+  const expBody = {
+    name: 'E2E Experiment',
+    basePrompt: 'E2E experiment mission: trivial.',
+    cycleCap: 1,
+    defaults: {},
+    variants: [
+      { label: 'v1', overrides: {}, promptSuffix: '' },
+      { label: 'v2', overrides: {}, promptSuffix: '' },
+    ],
+  };
+  // Pause the loop while creating the experiment so the scheduler cannot
+  // pick a freshly-registered variant and spawn the REAL claude binary
+  // (project.claudeCmd only exists in-memory; the scheduler ticks
+  // independently every 150ms, so without this pause it can win the race).
+  sched.pauseAll();
+  const expCreated = await post('/api/experiments', expBody);
+  let expRecord = null;
+  try { expRecord = JSON.parse(expCreated.body).experiment; } catch (e) { /* checked below */ }
+  check('POST /api/experiments 200 + record', expCreated.status === 200 && !!expRecord, expCreated.body);
+
+  if (expRecord) {
+    // scheduler.addProject strips claudeCmd on load, but these entries were
+    // just added in-memory (never round-tripped through disk yet) - set
+    // claudeCmd directly on the live stateObj project entries so the
+    // scheduler's own runner spawn uses fake-claude, same as the first leg.
+    for (const v of expRecord.variants) {
+      const proj = state.getProject(stateObj, v.projectId);
+      if (proj) proj.claudeCmd = [process.execPath, fakeClaude];
+    }
+    sched.resumeAll();
+
+    const variantEventsFile = (label) => {
+      const v = expRecord.variants.find((x) => x.label === label);
+      const proj = state.getProject(stateObj, v.projectId);
+      return path.join(proj.dir, '.autopilot', 'events.jsonl');
+    };
+    const readVariantEvents = (label) => {
+      const f = variantEventsFile(label);
+      if (!fs.existsSync(f)) return [];
+      return fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean)
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    };
+
+    const expDeadline = Date.now() + 60000;
+    let bothComplete = false;
+    while (Date.now() < expDeadline) {
+      const v1complete = readVariantEvents('v1').some((e) => e.ev === 'variant_complete');
+      const v2complete = readVariantEvents('v2').some((e) => e.ev === 'variant_complete');
+      if (v1complete && v2complete) { bothComplete = true; break; }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    check('both experiment variants stamp variant_complete', bothComplete);
+
+    const listRes = await get('/api/experiments');
+    let expList = null;
+    try { expList = JSON.parse(listRes.body).experiments; } catch (e) { /* checked below */ }
+    const listedExp = expList && expList.find((e) => e.id === expRecord.id);
+    check('GET /api/experiments shows complete:true', !!listedExp && listedExp.complete === true, listedExp && JSON.stringify({ complete: listedExp.complete }));
+  } else {
+    sched.resumeAll();
+  }
+
   sseReq.destroy();
   await sched.stopDaemon();
   srv.close();

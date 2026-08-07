@@ -9,6 +9,10 @@ const path = require('path');
 const { EventEmitter } = require('events');
 
 const { startServer } = require('../src/server');
+const state = require('../src/state');
+const experimentsModule = require('../src/experiments');
+const { Scheduler } = require('../src/scheduler');
+const util = require('../src/util');
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -405,4 +409,171 @@ test('GET / and /index.html serve ui/index.html; GET /mock-status.json serves th
     assert.equal(mock.status, 200);
     assert.ok(mock.body);
   });
+});
+
+// ---------------------------------------------------------------------------
+// experiments routes - these dispatch to the REAL src/experiments.js module
+// (not the fake scheduler's canned methods), so use a real Scheduler
+// instance + temp AUTOPILOT_HOME_OVERRIDE / AUTOPILOT_EXPERIMENTS_DIR_OVERRIDE.
+// ---------------------------------------------------------------------------
+
+function makeRealScheduler() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-srv-exp-home-'));
+  const expRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-srv-exp-root-'));
+  process.env.AUTOPILOT_HOME_OVERRIDE = home;
+  process.env.AUTOPILOT_EXPERIMENTS_DIR_OVERRIDE = expRoot;
+
+  const stateObj = { settings: { ceilingPct: 75, graceMinutes: 0, webhook: null, port: 4680 }, projects: [] };
+  const budget = {
+    async check() {
+      return { ok: true, reason: null, windows: [], resetsAt: null, checkedIso: util.nowIso() };
+    },
+    noteUsageLimitExit() {},
+    async probeGate() {
+      return { ok: false };
+    },
+    isFatal() {
+      return false;
+    },
+    clearFatal() {},
+  };
+  const sched = new Scheduler({
+    stateObj,
+    budget,
+    runCycleImpl: async () => ({ exit: 'clean', code: 0, minutes: 0.01, tokens: { in: 1, out: 1 }, costUsd: 0.001, commit: null, gitDiff: { files: 0, ins: 0, del: 0 } }),
+    notifyImpl: () => {},
+    tickMs: 999999,
+  });
+  return { sched, home, expRoot };
+}
+
+function cleanupRealScheduler(ctx) {
+  delete process.env.AUTOPILOT_HOME_OVERRIDE;
+  delete process.env.AUTOPILOT_EXPERIMENTS_DIR_OVERRIDE;
+  try { fs.rmSync(ctx.home, { recursive: true, force: true }); } catch (e) { /* best effort */ }
+  try { fs.rmSync(ctx.expRoot, { recursive: true, force: true }); } catch (e) { /* best effort */ }
+}
+
+function basicExperimentBody(overrides) {
+  return Object.assign(
+    {
+      name: 'Server Route Test',
+      basePrompt: 'Build a small website.',
+      cycleCap: 5,
+      defaults: {},
+      variants: [{ label: 'baseline', overrides: {}, promptSuffix: '' }],
+    },
+    overrides || {}
+  );
+}
+
+test('POST /api/experiments happy path returns 200 + record; GET /api/experiments returns the list', async () => {
+  const ctx = makeRealScheduler();
+  try {
+    await withServer(ctx.sched, async (port) => {
+      const created = await requestRaw(port, 'POST', '/api/experiments', {
+        host: `127.0.0.1:${port}`,
+        body: basicExperimentBody(),
+      });
+      assert.equal(created.status, 200);
+      assert.ok(created.body.experiment);
+      assert.equal(created.body.experiment.variants.length, 1);
+
+      const listed = await requestRaw(port, 'GET', '/api/experiments', { host: `127.0.0.1:${port}` });
+      assert.equal(listed.status, 200);
+      assert.ok(Array.isArray(listed.body.experiments));
+      assert.ok(listed.body.experiments.some((e) => e.id === created.body.experiment.id));
+    });
+  } finally {
+    cleanupRealScheduler(ctx);
+  }
+});
+
+test('POST /api/experiments with invalid body returns 400 with an error', async () => {
+  const ctx = makeRealScheduler();
+  try {
+    await withServer(ctx.sched, async (port) => {
+      const res = await requestRaw(port, 'POST', '/api/experiments', {
+        host: `127.0.0.1:${port}`,
+        body: basicExperimentBody({ name: '' }),
+      });
+      assert.equal(res.status, 400);
+      assert.ok(res.body && res.body.error);
+    });
+  } finally {
+    cleanupRealScheduler(ctx);
+  }
+});
+
+test('DELETE /api/experiments/:id for an unknown experiment returns 409', async () => {
+  const ctx = makeRealScheduler();
+  try {
+    await withServer(ctx.sched, async (port) => {
+      const res = await requestRaw(port, 'DELETE', '/api/experiments/no-such-experiment?dirs=1', { host: `127.0.0.1:${port}` });
+      assert.equal(res.status, 409);
+      assert.ok(res.body && res.body.error);
+    });
+  } finally {
+    cleanupRealScheduler(ctx);
+  }
+});
+
+test('preview route: bare path redirects to trailing slash; trailing slash serves index.html; traversal 404s; unknown experiment 404s', async () => {
+  const ctx = makeRealScheduler();
+  try {
+    await withServer(ctx.sched, async (port) => {
+      const created = await requestRaw(port, 'POST', '/api/experiments', {
+        host: `127.0.0.1:${port}`,
+        body: basicExperimentBody(),
+      });
+      assert.equal(created.status, 200);
+      const expId = created.body.experiment.id;
+      const label = created.body.experiment.variants[0].label;
+      const projectId = created.body.experiment.variants[0].projectId;
+      const project = state.getProject(ctx.sched.stateObj, projectId);
+      fs.writeFileSync(path.join(project.dir, 'index.html'), '<h1>hello</h1>');
+
+      // bare path -> 302 to trailing slash
+      const redirect = await new Promise((resolve, reject) => {
+        const req = http.request(
+          { host: '127.0.0.1', port, path: `/preview/${expId}/${label}`, method: 'GET', headers: { Host: `127.0.0.1:${port}` } },
+          (res) => {
+            resolve({ status: res.statusCode, location: res.headers.location });
+            res.resume();
+          }
+        );
+        req.on('error', reject);
+        req.end();
+      });
+      assert.equal(redirect.status, 302);
+      assert.equal(redirect.location, `/preview/${expId}/${label}/`);
+
+      // trailing slash -> index.html, text/html
+      const served = await new Promise((resolve, reject) => {
+        const req = http.request(
+          { host: '127.0.0.1', port, path: `/preview/${expId}/${label}/`, method: 'GET', headers: { Host: `127.0.0.1:${port}` } },
+          (res) => {
+            let data = '';
+            res.on('data', (c) => (data += c));
+            res.on('end', () => resolve({ status: res.statusCode, contentType: res.headers['content-type'], body: data }));
+          }
+        );
+        req.on('error', reject);
+        req.end();
+      });
+      assert.equal(served.status, 200);
+      assert.match(served.contentType, /text\/html/);
+      assert.match(served.body, /hello/);
+
+      // traversal -> 404
+      const traversal = await requestRaw(port, 'GET', `/preview/${expId}/${label}/../../../../etc/passwd`, { host: `127.0.0.1:${port}` });
+      assert.equal(traversal.status, 404);
+
+      // unknown experiment -> 404
+      const unknown = await requestRaw(port, 'GET', `/preview/no-such-experiment/${label}/`, { host: `127.0.0.1:${port}` });
+      assert.equal(unknown.status, 404);
+    });
+  } finally {
+    cleanupRealScheduler(ctx);
+  }
 });

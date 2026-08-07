@@ -169,8 +169,8 @@
   .plan .box.tick { color: var(--success); }
 
   /* ---------- Modal ---------- */
-  #modalBg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 10; }
-  #modalBg.on { display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; }
+  #modalBg, #expModalBg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 10; }
+  #modalBg.on, #expModalBg.on { display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; }
   .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; width: 520px; max-width: 92vw; max-height: 84vh; overflow-y: auto; }
   .modal h3 { font-size: 20px; font-weight: 600; margin-bottom: 16px; }
   .frow { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
@@ -219,6 +219,15 @@
   .inj-pending { border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: 6px; padding: 8px 12px; margin-bottom: 16px; background: var(--surface-2); }
   .inj-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
   .inj-text { font-size: 13px; white-space: pre-wrap; }
+
+  /* ---------- Experiments ---------- */
+  .exp-section { margin-top: 32px; }
+  .exp-card table { margin-top: 4px; }
+  .exp-card .m-actions, .exp-card .cfg-actions { margin-top: 12px; }
+  .modal.wide { width: 820px; }
+  #ex-variants-table input[type=text], #ex-variants-table select { width: 100%; font-size: 12px; }
+  #ex-variants-table td { white-space: normal; }
+  #expError { font-size: 12px; color: var(--accent); margin-bottom: 12px; }
 
   .empty-state { grid-column: 1 / -1; text-align: center; padding: 96px 32px; color: var(--text-secondary); }
   .empty-state h2 { font-size: 20px; font-weight: 600; color: var(--text-primary); margin-bottom: 12px; }
@@ -274,6 +283,14 @@
     <div class="detail" id="detail"></div>
   </div>
 
+  <div class="exp-section">
+    <div class="plist-head">
+      <h2>Experiments</h2>
+      <button class="primary" onclick="openExpModal()">+ New Experiment</button>
+    </div>
+    <div id="expList"></div>
+  </div>
+
   <footer>
     <span id="mockTag"></span>
     <span style="margin-left:auto">autopilot v0.2</span>
@@ -320,6 +337,39 @@
   </div>
 </div>
 
+<div id="expModalBg" onclick="if(event.target===this)closeExpModal()">
+  <div class="modal wide">
+    <h3>New Experiment</h3>
+    <div id="expError" style="display:none"></div>
+    <form id="expForm" onsubmit="submitExp(event)">
+      <div class="frow"><label>Name</label>
+        <input type="text" id="ex-name" placeholder="The Robots' Home v1" required>
+      </div>
+      <div class="frow"><label>Base mission prompt</label>
+        <textarea id="ex-prompt" required></textarea>
+      </div>
+      <div class="fgrid">
+        <div class="frow"><label>Cycle cap</label><input type="number" id="ex-cap" value="5" min="1"></div>
+        <div class="frow"><label>Default model</label><input type="text" id="ex-def-model" placeholder="optional"></div>
+        <div class="frow"><label>Default worker model</label><input type="text" id="ex-def-worker" placeholder="optional"></div>
+        <div class="frow"><label>Default effort</label>
+          <select id="ex-def-effort"><option value="">default</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select>
+        </div>
+        <div class="frow"><label>Default verify command</label><input type="text" id="ex-def-verify" placeholder="optional"></div>
+      </div>
+      <div class="frow">
+        <label>Variants</label>
+        <table id="ex-variants-table">
+          <tr><th>label</th><th>model</th><th>worker model</th><th>effort</th><th>prompt suffix</th><th></th></tr>
+          <tbody id="ex-variants-body"></tbody>
+        </table>
+        <div style="margin-top:8px"><button type="button" onclick="addExpVariantRow()">+ Add variant</button></div>
+      </div>
+      <div class="m-actions"><button type="button" class="ghost" onclick="closeExpModal()">Cancel</button><button type="submit" class="primary">Create</button></div>
+    </form>
+  </div>
+</div>
+
 <script>
 'use strict';
 
@@ -333,6 +383,8 @@ let tailLines = [];          // activity lines for the selected project (cap 500
 let detailCache = { events: [], updatesMd: '', planMd: '' };
 let es = null;               // EventSource
 let mockData = null;         // loaded ui/mock-status.json (mock mode only)
+let experiments = [];        // last GET /api/experiments result
+let expRefreshPending = false;
 
 document.getElementById('mockTag').textContent = isMock ? 'mock mode (?mock=1) — buttons are no-ops, see console' : '';
 
@@ -1185,6 +1237,280 @@ async function submitAdd(ev) {
 }
 
 /* ============================================================
+   Experiments
+   Spec: docs/superpowers/specs/2026-08-07-experiments-design.md.
+   Own list (GET /api/experiments), not part of the status snapshot;
+   refreshed on demand plus a debounced hook off the SSE status event.
+   ============================================================ */
+const DEFAULT_MISSION_PROMPT = "You are building a website that will live at "
+  + "therobotshome.com. The owner will purchase the domain once the site is "
+  + "worth it - build as if it will be live there. Build 'The Robots' Home': "
+  + "make it distinctive and complete. Static site only: put all output in a "
+  + "site/ directory at the project root (index.html entry point, relative "
+  + "asset paths). Keep a PLAN.md and log progress in UPDATES.md each cycle.";
+
+async function loadExperiments() {
+  if (isMock) { experiments = []; renderExperiments(); return; }
+  try {
+    const data = await apiGet('/api/experiments');
+    experiments = data.experiments || [];
+    renderExperiments();
+  } catch (e) {
+    console.error('load experiments failed', e);
+  }
+}
+
+// At most once per few seconds, however many status events arrive meanwhile.
+function scheduleExpRefresh() {
+  if (expRefreshPending) return;
+  expRefreshPending = true;
+  setTimeout(() => { expRefreshPending = false; loadExperiments(); }, 4000);
+}
+
+// fanOut (stop/start) and delete both return {experiments:[...]} directly;
+// apply it straight to the cache instead of re-fetching.
+async function doExpAction(url, method) {
+  try {
+    if (isMock) { console.log('[mock] exp action (no-op)', url); return; }
+    const res = await fetch(url, { method: method || 'POST' });
+    if (!res.ok) {
+      let msg = method + ' ' + url + ' -> ' + res.status;
+      try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (e) {}
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    if (data && data.experiments) { experiments = data.experiments; renderExperiments(); }
+  } catch (e) {
+    console.error(e);
+    alert('Action failed: ' + e.message);
+  }
+}
+
+async function variantAction(projectId, action) {
+  await doAction('/api/projects/' + encodeURIComponent(projectId) + '/' + action);
+  await loadExperiments();
+}
+
+async function expStopAll(id) { await doExpAction('/api/experiments/' + encodeURIComponent(id) + '/stop'); }
+async function expStartAll(id) { await doExpAction('/api/experiments/' + encodeURIComponent(id) + '/start'); }
+
+async function deleteExperimentConfirm(id) {
+  if (!confirm('Delete experiment "' + id + '"?\n\nThis deregisters all its variant projects from Autopilot.')) return;
+  let dirs = false;
+  if (confirm('Also delete the experiment\'s directories on disk?\n\nThis cannot be undone.')) dirs = true;
+  await doExpAction('/api/experiments/' + encodeURIComponent(id) + (dirs ? '?dirs=1' : ''), 'DELETE');
+}
+
+// Jump to the variant's own project card in the Projects/detail pane -
+// experiments have no separate log view, variants are ordinary projects.
+function gotoProjectLog(projectId) {
+  selectProject(projectId);
+  const el = document.getElementById('detail');
+  if (el) el.scrollIntoView({ behavior: 'smooth' });
+}
+
+// Override diffs only: the overrides object entries plus a non-empty
+// promptSuffix. Everything else is inherited from the experiment defaults
+// and isn't worth repeating on every row.
+function fmtOverrides(v) {
+  const parts = [];
+  const ov = v.overrides || {};
+  Object.keys(ov).forEach(k => parts.push(k + '=' + ov[k]));
+  if (v.promptSuffix) {
+    const s = v.promptSuffix.length > 40 ? v.promptSuffix.slice(0, 40) + '…' : v.promptSuffix;
+    parts.push('suffix: ' + s);
+  }
+  return parts.length ? escapeHtml(parts.join(', ')) : '<span style="color:var(--text-secondary)">no overrides</span>';
+}
+
+function expVerifyDot(v) {
+  if (v.lastVerify == null) return '';
+  const ok = v.lastVerify.ok;
+  return `<span class="chip ${ok ? 'success' : 'fatal'}">${ok ? 'verify pass' : 'verify fail'}</span>`;
+}
+
+function renderExpVariantRow(exp, v) {
+  const totals = v.totals || {};
+  const tok = totals.in != null ? fmtTokens(totals.in) + ' / ' + fmtTokens(totals.out) : '';
+  const cost = totals.costUsd != null ? fmtCost(totals.costUsd) : '';
+  const stopStartBtn = v.status === 'stopped'
+    ? `<button onclick="variantAction('${escapeHtml(v.projectId)}','start')">Start</button>`
+    : `<button onclick="variantAction('${escapeHtml(v.projectId)}','stop')" ${v.status === 'fatal' ? 'disabled title="clear global FATAL first"' : ''}>Stop</button>`;
+  return `
+    <tr>
+      <td>${escapeHtml(v.label)}</td>
+      <td>${fmtOverrides(v)}</td>
+      <td class="num">${safeNum(v.cycle, 0)}/${safeNum(exp.cycleCap, 0)}</td>
+      <td><span class="chip ${CHIP_CLS[v.status] || ''}">${escapeHtml(CHIP_TXT[v.status] || v.status)}</span> <span style="color:var(--text-secondary)">${escapeHtml(v.statusDetail || '')}</span></td>
+      <td class="num">${tok}</td>
+      <td class="num">${cost}</td>
+      <td>${expVerifyDot(v)}</td>
+      <td>
+        <a href="/preview/${encodeURIComponent(exp.id)}/${encodeURIComponent(v.label)}/" target="_blank" rel="noopener">Preview</a>
+        &nbsp;<a href="#" onclick="event.preventDefault();gotoProjectLog('${escapeHtml(v.projectId)}')">Log</a>
+      </td>
+      <td>${stopStartBtn}</td>
+    </tr>`;
+}
+
+function renderExpCard(exp) {
+  const rows = exp.variants.map(v => renderExpVariantRow(exp, v)).join('');
+  return `
+    <div class="card exp-card">
+      <h3>${escapeHtml(exp.name)}
+        <span class="sub">
+          <span class="chip ${exp.complete ? 'success' : 'running'}">${exp.complete ? 'complete' : 'running'}</span>
+          created ${escapeHtml((exp.created || '').slice(0, 10))} &middot; cap ${safeNum(exp.cycleCap, 0)} cycles
+        </span>
+      </h3>
+      <table>
+        <tr><th>variant</th><th>overrides</th><th class="num">cycle</th><th>status</th><th class="num">tokens</th><th class="num">cost</th><th>verify</th><th>links</th><th></th></tr>
+        ${rows || '<tr><td colspan="9" class="empty-note">(no variants)</td></tr>'}
+      </table>
+      <div class="cfg-actions">
+        <span class="cfg-note"></span>
+        <button onclick="expStopAll('${escapeHtml(exp.id)}')">Stop All</button>
+        <button onclick="expStartAll('${escapeHtml(exp.id)}')">Start All</button>
+        <button onclick="deleteExperimentConfirm('${escapeHtml(exp.id)}')">Delete</button>
+      </div>
+    </div>`;
+}
+
+function renderExperiments() {
+  const el = document.getElementById('expList');
+  if (!el) return;
+  el.innerHTML = experiments.length
+    ? experiments.map(renderExpCard).join('')
+    : '<div class="empty-note">(no experiments yet)</div>';
+}
+
+/* ---- New Experiment modal ---- */
+let expVariantSeq = 0;
+
+function addExpVariantRow(data) {
+  const body = document.getElementById('ex-variants-body');
+  expVariantSeq += 1;
+  const rowId = 'exv' + expVariantSeq;
+  const d = data || {};
+  const tr = document.createElement('tr');
+  tr.id = rowId;
+  tr.innerHTML = `
+    <td><input type="text" class="exv-label" value="${escapeHtml(d.label || '')}" placeholder="variant-${expVariantSeq}"></td>
+    <td><input type="text" class="exv-model" value="${escapeHtml(d.model || '')}" placeholder="inherit"></td>
+    <td><input type="text" class="exv-worker" value="${escapeHtml(d.workerModel || '')}" placeholder="inherit"></td>
+    <td><select class="exv-effort">
+          <option value="">inherit</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option>
+        </select></td>
+    <td><input type="text" class="exv-suffix" value="${escapeHtml(d.promptSuffix || '')}" placeholder="optional"></td>
+    <td><button type="button" onclick="dupExpVariantRow('${rowId}')">Duplicate row</button>
+        <button type="button" onclick="removeExpVariantRow('${rowId}')">Remove</button></td>`;
+  body.appendChild(tr);
+  const sel = tr.querySelector('.exv-effort');
+  if (d.effort) sel.value = d.effort;
+}
+
+function dupExpVariantRow(rowId) {
+  const tr = document.getElementById(rowId);
+  if (!tr) return;
+  addExpVariantRow({
+    label: tr.querySelector('.exv-label').value,
+    model: tr.querySelector('.exv-model').value,
+    workerModel: tr.querySelector('.exv-worker').value,
+    effort: tr.querySelector('.exv-effort').value,
+    promptSuffix: tr.querySelector('.exv-suffix').value,
+  });
+}
+
+function removeExpVariantRow(rowId) {
+  const body = document.getElementById('ex-variants-body');
+  if (body.children.length <= 1) return; // always at least one row
+  const tr = document.getElementById(rowId);
+  if (tr) tr.remove();
+}
+
+function openExpModal() {
+  document.getElementById('expForm').reset();
+  document.getElementById('ex-prompt').value = DEFAULT_MISSION_PROMPT;
+  document.getElementById('ex-cap').value = 5;
+  document.getElementById('ex-variants-body').innerHTML = '';
+  addExpVariantRow();
+  const err = document.getElementById('expError');
+  err.style.display = 'none';
+  err.textContent = '';
+  document.getElementById('expModalBg').classList.add('on');
+}
+
+function closeExpModal() {
+  document.getElementById('expModalBg').classList.remove('on');
+}
+
+async function submitExp(ev) {
+  ev.preventDefault();
+  const err = document.getElementById('expError');
+  err.style.display = 'none';
+  err.textContent = '';
+
+  const defaults = {};
+  const dModel = document.getElementById('ex-def-model').value.trim();
+  const dWorker = document.getElementById('ex-def-worker').value.trim();
+  const dEffort = document.getElementById('ex-def-effort').value;
+  const dVerify = document.getElementById('ex-def-verify').value.trim();
+  if (dModel) defaults.model = dModel;
+  if (dWorker) defaults.workerModel = dWorker;
+  if (dEffort) defaults.effort = dEffort;
+  if (dVerify) defaults.verifyCmd = dVerify;
+
+  const rows = Array.from(document.querySelectorAll('#ex-variants-body tr'));
+  const variants = rows.map(tr => {
+    const label = tr.querySelector('.exv-label').value.trim();
+    const model = tr.querySelector('.exv-model').value.trim();
+    const workerModel = tr.querySelector('.exv-worker').value.trim();
+    const effort = tr.querySelector('.exv-effort').value;
+    const promptSuffix = tr.querySelector('.exv-suffix').value.trim();
+    const overrides = {};
+    if (model) overrides.model = model;
+    if (workerModel) overrides.workerModel = workerModel;
+    if (effort) overrides.effort = effort;
+    const v = { overrides };
+    if (label) v.label = label;
+    if (promptSuffix) v.promptSuffix = promptSuffix;
+    return v;
+  });
+
+  const body = {
+    name: document.getElementById('ex-name').value.trim(),
+    basePrompt: document.getElementById('ex-prompt').value.trim(),
+    cycleCap: +document.getElementById('ex-cap').value || 5,
+    defaults,
+    variants,
+  };
+  if (!body.name || !body.basePrompt) {
+    err.textContent = 'Name and base prompt are required.';
+    err.style.display = 'block';
+    return;
+  }
+
+  try {
+    if (isMock) { console.log('[mock] create experiment (no-op)', body); closeExpModal(); return; }
+    const res = await fetch('/api/experiments', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      let msg = 'request failed: ' + res.status;
+      try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (e) {}
+      err.textContent = msg;
+      err.style.display = 'block';
+      return;
+    }
+    closeExpModal();
+    await loadExperiments();
+  } catch (e) {
+    err.textContent = e.message;
+    err.style.display = 'block';
+  }
+}
+
+/* ============================================================
    Status apply / SSE
    ============================================================ */
 function applyStatus(newStatus) {
@@ -1205,6 +1531,7 @@ function connectStream() {
     setConnOk();
     try { applyStatus(JSON.parse(ev.data)); }
     catch (e) { console.error('bad status event', e); }
+    scheduleExpRefresh();
   });
 
   es.addEventListener('activity', ev => {
@@ -1254,6 +1581,7 @@ async function boot() {
     status = snap;
     renderHeader();
     renderProjectList();
+    loadExperiments();
     connectStream();
   } catch (e) {
     console.error(e);

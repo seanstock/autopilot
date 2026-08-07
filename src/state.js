@@ -183,9 +183,12 @@ const EDITABLE_KEYS = [
   'containment',
   'verifyCmd',
   'enabled',
+  // Experiments (2026-08-07 spec): hard cycle cap; the scheduler disables
+  // the project when runtime.cycle reaches it. 0/absent = uncapped.
+  'maxCycles',
 ];
 
-const NUMERIC_KEYS = new Set(['priority', 'maxCycleMinutes', 'criticRatio', 'reviewGateCycles']);
+const NUMERIC_KEYS = new Set(['priority', 'maxCycleMinutes', 'criticRatio', 'reviewGateCycles', 'maxCycles']);
 // claude --effort levels (shared via util so state + runner never drift).
 // max is accepted because Autopilot passes effort via the `--effort` CLI
 // flag, not the settings file (settings-file effortLevel forbids max).

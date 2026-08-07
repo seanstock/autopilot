@@ -17,6 +17,30 @@ const { URL } = require('url');
 
 const util = require('./util');
 const events = require('./events');
+const experiments = require('./experiments');
+
+// Preview static serving (experiments spec 2026-08-07): variant output only,
+// resolved + traversal-guarded in experiments.resolvePreviewPath. Anything
+// not in this map serves as octet-stream (download, never executed).
+const PREVIEW_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/plain; charset=utf-8',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+};
 
 const UI_DIR = path.join(__dirname, '..', 'ui');
 
@@ -264,6 +288,54 @@ function startServer({ scheduler, port }) {
     }
     if (method === 'GET' && pathname === '/mock-status.json') {
       return serveFile(res, path.join(UI_DIR, 'mock-status.json'), 'application/json; charset=utf-8');
+    }
+
+    // ---- experiments -------------------------------------------------------
+    if (pathname === '/api/experiments') {
+      if (method === 'GET') {
+        return sendJson(res, 200, { experiments: experiments.listExperiments(scheduler) });
+      }
+      if (method === 'POST') {
+        const body = await readJsonBody(req);
+        try {
+          const record = experiments.createExperiment(scheduler, body);
+          return sendJson(res, 200, { experiment: record });
+        } catch (err) {
+          const status = err && err.status === 400 ? 400 : 500;
+          if (status === 500) util.log('server: createExperiment failed', String((err && err.stack) || err));
+          return sendJson(res, status, { error: String((err && err.message) || 'experiment creation failed') });
+        }
+      }
+    }
+
+    let em = pathname.match(/^\/api\/experiments\/([^/]+)\/(stop|start)$/);
+    if (em && method === 'POST') {
+      const ok = experiments.fanOut(scheduler, em[1], em[2]);
+      if (!ok) return sendJson(res, 404, { error: 'unknown experiment' });
+      return sendJson(res, 200, { experiments: experiments.listExperiments(scheduler) });
+    }
+
+    em = pathname.match(/^\/api\/experiments\/([^/]+)$/);
+    if (em && method === 'DELETE') {
+      const result = experiments.deleteExperiment(scheduler, em[1], query.get('dirs') === '1');
+      if (!result.ok) return sendJson(res, 409, { error: result.error });
+      return sendJson(res, 200, { experiments: experiments.listExperiments(scheduler) });
+    }
+
+    // Serve a variant's built output. /preview/<exp>/<label>/<anything>.
+    em = pathname.match(/^\/preview\/([^/]+)\/([^/]+)(\/.*)?$/);
+    if (em && method === 'GET') {
+      if (!em[3]) {
+        // Redirect /preview/e/v to /preview/e/v/ so relative asset URLs in
+        // the served page resolve under the variant's own path prefix.
+        res.writeHead(302, { Location: `${pathname}/` });
+        res.end();
+        return;
+      }
+      const filePath = experiments.resolvePreviewPath(em[1], em[2], em[3]);
+      if (!filePath) return sendJson(res, 404, { error: 'no output yet' });
+      const ext = path.extname(filePath).toLowerCase();
+      return serveFile(res, filePath, PREVIEW_TYPES[ext] || 'application/octet-stream');
     }
 
     // ---- status + stream ---------------------------------------------------
