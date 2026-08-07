@@ -369,6 +369,7 @@
           <select id="ex-def-effort"><option value="">default</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select>
         </div>
         <div class="frow"><label>Default verify command</label><input type="text" id="ex-def-verify" placeholder="optional"></div>
+        <div class="frow"><label>Port base</label><input type="number" id="ex-portbase" min="1024" max="64000" placeholder="empty = static site" onchange="onExpPortBaseChange()" title="Server experiment: variant i gets port base+i as a local Docker container. Check the port range is free first."></div>
       </div>
       <div class="frow">
         <label>Variants</label>
@@ -1262,6 +1263,42 @@ const DEFAULT_MISSION_PROMPT = "You are building a website that will live at "
   + "site/ directory at the project root (index.html entry point, relative "
   + "asset paths). Keep a PLAN.md and log progress in UPDATES.md each cycle.";
 
+// Prefill used when a port base is set: a live server variant running as a
+// local Docker container. {{PORT}}/{{LABEL}}/{{CONTAINER}} are substituted
+// per variant at creation by the daemon. The fences (own port, own
+// container, 127.0.0.1 bind, no volume mounts) are stated as ownership in
+// the literal text each agent reads.
+const SERVER_MISSION_PROMPT = "You are building The Robots' Home, a live web "
+  + "app that will live at therobotshome.com. The owner will purchase the "
+  + "domain once it is worth it - build as if it will be live there. Make it "
+  + "distinctive and complete.\n\n"
+  + "It runs as a Docker container on this machine. You own port {{PORT}} and "
+  + "the container name {{CONTAINER}} - nothing else. Never touch any other "
+  + "container, image or port. Deploy every cycle you change code:\n"
+  + "  docker build -t {{CONTAINER}} .\n"
+  + "  docker rm -f {{CONTAINER}} 2>nul & docker run -d --name {{CONTAINER}} "
+  + "--restart=unless-stopped --memory=256m --cpus=0.5 -p 127.0.0.1:{{PORT}}:8000 {{CONTAINER}}\n"
+  + "Bind 127.0.0.1 only, exactly as above. Never use -v volume mounts: the "
+  + "image is the deploy. The app must listen on port 8000 inside the "
+  + "container and serve GET /healthz with 200. After deploying, curl "
+  + "http://127.0.0.1:{{PORT}}/ and confirm it serves before ending the "
+  + "cycle. Keep a PLAN.md and log progress in UPDATES.md each cycle.";
+
+const SERVER_DEFAULT_VERIFY = 'curl -sf -m 8 http://127.0.0.1:{{PORT}}/healthz';
+
+// Swap the prompt/verify prefills when the port base is set or cleared, but
+// only while they are still untouched templates - never overwrite text the
+// user has edited.
+function onExpPortBaseChange() {
+  const has = document.getElementById('ex-portbase').value.trim() !== '';
+  const promptEl = document.getElementById('ex-prompt');
+  const verifyEl = document.getElementById('ex-def-verify');
+  if (has && promptEl.value === DEFAULT_MISSION_PROMPT) promptEl.value = SERVER_MISSION_PROMPT;
+  if (!has && promptEl.value === SERVER_MISSION_PROMPT) promptEl.value = DEFAULT_MISSION_PROMPT;
+  if (has && verifyEl.value === '') verifyEl.value = SERVER_DEFAULT_VERIFY;
+  if (!has && verifyEl.value === SERVER_DEFAULT_VERIFY) verifyEl.value = '';
+}
+
 async function loadExperiments() {
   if (isMock) { experiments = []; renderExperiments(); return; }
   try {
@@ -1309,9 +1346,12 @@ async function expStartAll(id) { await doExpAction('/api/experiments/' + encodeU
 
 async function deleteExperimentConfirm(id) {
   if (!confirm('Delete experiment "' + id + '"?\n\nThis deregisters all its variant projects from Autopilot.')) return;
-  let dirs = false;
-  if (confirm('Also delete the experiment\'s directories on disk?\n\nThis cannot be undone.')) dirs = true;
-  await doExpAction('/api/experiments/' + encodeURIComponent(id) + (dirs ? '?dirs=1' : ''), 'DELETE');
+  const params = [];
+  if (confirm('Also delete the experiment\'s directories on disk?\n\nThis cannot be undone.')) params.push('dirs=1');
+  const exp = experiments.find(e => e.id === id);
+  const isServer = !!(exp && exp.portBase != null);
+  if (isServer && confirm('Also remove the experiment\'s Docker containers (docker rm -f exp-...)?')) params.push('containers=1');
+  await doExpAction('/api/experiments/' + encodeURIComponent(id) + (params.length ? '?' + params.join('&') : ''), 'DELETE');
 }
 
 // Jump to the variant's own project card in the Projects/detail pane -
@@ -1359,7 +1399,9 @@ function renderExpVariantRow(exp, v) {
       <td class="num">${cost}</td>
       <td>${expVerifyDot(v)}</td>
       <td>
-        <a href="/preview/${encodeURIComponent(exp.id)}/${encodeURIComponent(v.label)}/" target="_blank" rel="noopener">Preview</a>
+        ${v.port != null
+          ? `<a href="http://localhost:${safeNum(v.port, 0)}/" target="_blank" rel="noopener" title="container ${escapeHtml(v.container || '')}">Preview :${safeNum(v.port, 0)}</a>`
+          : `<a href="/preview/${encodeURIComponent(exp.id)}/${encodeURIComponent(v.label)}/" target="_blank" rel="noopener">Preview</a>`}
         &nbsp;<a href="#" onclick="event.preventDefault();gotoProjectLog('${escapeHtml(v.projectId)}')">Log</a>
       </td>
       <td>${stopStartBtn}</td>
@@ -1373,7 +1415,7 @@ function renderExpCard(exp) {
       <h3>${escapeHtml(exp.name)}
         <span class="sub">
           <span class="chip ${exp.complete ? 'success' : 'running'}">${exp.complete ? 'complete' : 'running'}</span>
-          created ${escapeHtml((exp.created || '').slice(0, 10))} &middot; cap ${safeNum(exp.cycleCap, 0)} cycles
+          created ${escapeHtml((exp.created || '').slice(0, 10))} &middot; cap ${safeNum(exp.cycleCap, 0)} cycles${exp.portBase != null ? ' &middot; server, ports ' + safeNum(exp.portBase, 0) + '-' + (safeNum(exp.portBase, 0) + exp.variants.length - 1) : ''}
         </span>
       </h3>
       <table>
@@ -1497,6 +1539,8 @@ async function submitExp(ev) {
     defaults,
     variants,
   };
+  const portBase = document.getElementById('ex-portbase').value.trim();
+  if (portBase) body.portBase = +portBase;
   if (!body.name || !body.basePrompt) {
     err.textContent = 'Name and base prompt are required.';
     err.style.display = 'block';

@@ -317,7 +317,7 @@ function startServer({ scheduler, port }) {
 
     em = pathname.match(/^\/api\/experiments\/([^/]+)$/);
     if (em && method === 'DELETE') {
-      const result = experiments.deleteExperiment(scheduler, em[1], query.get('dirs') === '1');
+      const result = experiments.deleteExperiment(scheduler, em[1], query.get('dirs') === '1', query.get('containers') === '1');
       if (!result.ok) return sendJson(res, 409, { error: result.error });
       return sendJson(res, 200, { experiments: experiments.listExperiments(scheduler) });
     }

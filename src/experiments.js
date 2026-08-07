@@ -70,8 +70,22 @@ const OVERRIDE_KEYS = ['model', 'workerModel', 'effort', 'workerEffort', 'verify
 // pre-existing one). experiments.json is written last, so a half-created
 // experiment can never appear in the store.
 //
-// body: { name, basePrompt, cycleCap, defaults: {model,...}, variants:
-//        [{ label, promptSuffix, overrides: {model,...} }, ...] }
+// Server experiments (local Docker, KISS v1): an optional integer portBase
+// leases port portBase+i to variant i and names its container
+// exp-<expId>-<label>. {{PORT}}, {{LABEL}} and {{CONTAINER}} placeholders in
+// the mission prompt, suffix and verifyCmd are substituted per variant at
+// creation, so the fences (own port, own container name, 127.0.0.1 bind)
+// arrive in the literal text the agent reads. Without portBase nothing is
+// substituted and the experiment is a plain static one.
+function applyTemplate(text, vars) {
+  return String(text)
+    .replace(/\{\{PORT\}\}/g, String(vars.port))
+    .replace(/\{\{LABEL\}\}/g, vars.label)
+    .replace(/\{\{CONTAINER\}\}/g, vars.container);
+}
+
+// body: { name, basePrompt, cycleCap, portBase?, defaults: {model,...},
+//        variants: [{ label, promptSuffix, overrides: {model,...} }, ...] }
 function createExperiment(scheduler, body) {
   const b = body && typeof body === 'object' ? body : {};
   const name = typeof b.name === 'string' ? b.name.trim() : '';
@@ -79,6 +93,8 @@ function createExperiment(scheduler, body) {
   const cycleCap = Number(b.cycleCap);
   const variants = Array.isArray(b.variants) ? b.variants : [];
   const defaults = b.defaults && typeof b.defaults === 'object' ? b.defaults : {};
+  const hasPortBase = b.portBase !== undefined && b.portBase !== null && b.portBase !== '';
+  const portBase = hasPortBase ? Number(b.portBase) : null;
 
   if (!name) throw badRequest('name is required');
   if (!basePrompt) throw badRequest('basePrompt is required');
@@ -87,6 +103,9 @@ function createExperiment(scheduler, body) {
   }
   if (variants.length < 1 || variants.length > 20) {
     throw badRequest('between 1 and 20 variants required');
+  }
+  if (hasPortBase && (!Number.isInteger(portBase) || portBase < 1024 || portBase > 64000)) {
+    throw badRequest('portBase must be an integer between 1024 and 64000');
   }
 
   const experiments = loadExperiments();
@@ -107,8 +126,17 @@ function createExperiment(scheduler, body) {
       if (value !== undefined && value !== '') overrides[key] = value;
     }
     const promptSuffix = typeof raw.promptSuffix === 'string' ? raw.promptSuffix.trim() : '';
-    return { label: unique, overrides, promptSuffix };
+    return { label: unique, overrides, promptSuffix, port: null, container: null };
   });
+
+  if (portBase !== null) {
+    prepared.forEach((v, i) => {
+      v.port = portBase + i;
+      v.container = `exp-${id}-${v.label}`;
+      const vars = { port: v.port, label: v.label, container: v.container };
+      if (v.overrides.verifyCmd) v.overrides.verifyCmd = applyTemplate(v.overrides.verifyCmd, vars);
+    });
+  }
 
   const expDir = path.join(experimentsRoot(), id);
   const createdDirs = [];
@@ -122,7 +150,10 @@ function createExperiment(scheduler, body) {
       createdDirs.push(dir);
       gitInit(dir);
 
-      const prompt = variant.promptSuffix ? `${basePrompt}\n\n${variant.promptSuffix}` : basePrompt;
+      let prompt = variant.promptSuffix ? `${basePrompt}\n\n${variant.promptSuffix}` : basePrompt;
+      if (variant.port !== null) {
+        prompt = applyTemplate(prompt, { port: variant.port, label: variant.label, container: variant.container });
+      }
       const project = scheduler.addProject(
         Object.assign({ dir, prompt, enabled: true }, variant.overrides)
       );
@@ -162,12 +193,15 @@ function createExperiment(scheduler, body) {
     name,
     basePrompt,
     cycleCap,
+    portBase,
     created: util.nowIso(),
     variants: prepared.map((v) => ({
       label: v.label,
       projectId: v.projectId,
       overrides: v.overrides,
       promptSuffix: v.promptSuffix,
+      port: v.port,
+      container: v.container,
     })),
   };
   experiments.push(record);
@@ -211,6 +245,8 @@ function listExperiments(scheduler) {
         projectId: v.projectId,
         overrides: v.overrides || {},
         promptSuffix: v.promptSuffix || '',
+        port: v.port != null ? v.port : null,
+        container: v.container || null,
         present: !!p,
         status: p ? p.status : 'missing',
         statusDetail: p ? p.statusDetail : 'project no longer registered',
@@ -227,11 +263,44 @@ function listExperiments(scheduler) {
       name: exp.name,
       basePrompt: exp.basePrompt,
       cycleCap: exp.cycleCap,
+      portBase: exp.portBase != null ? exp.portBase : null,
       created: exp.created,
       complete,
       variants,
     };
   });
+}
+
+// Container names eligible for teardown: exactly the exp-<id>-<label> names
+// this experiment leased, re-validated against a strict slug charset so a
+// corrupted store entry can never smuggle docker CLI arguments. Pure
+// function, unit-testable without docker.
+const CONTAINER_NAME_RE = /^exp-[a-z0-9][a-z0-9-]*$/;
+
+function teardownPlan(exp) {
+  if (!exp || !Array.isArray(exp.variants)) return [];
+  return exp.variants
+    .map((v) => v.container)
+    .filter((c) => typeof c === 'string' && CONTAINER_NAME_RE.test(c));
+}
+
+// Best-effort local docker teardown (Docker Desktop). A dead docker daemon
+// or missing container is logged, never fatal: the registry cleanup must
+// proceed regardless.
+function teardownContainers(exp, runner) {
+  const names = teardownPlan(exp);
+  if (names.length === 0) return;
+  const run = runner || ((args) => spawnSync('docker', args, { windowsHide: true, timeout: 60000 }));
+  for (const name of names) {
+    try {
+      const r = run(['rm', '-f', name]);
+      if (r.error || r.status !== 0) {
+        util.log('experiments: docker rm -f', name, 'failed:', r.error ? r.error.message : String(r.stderr || '').trim());
+      }
+    } catch (err) {
+      util.log('experiments: docker teardown threw for', name, String(err && err.message));
+    }
+  }
 }
 
 // Stop (STOP file) or start every variant of an experiment.
@@ -253,7 +322,7 @@ function fanOut(scheduler, expId, action) {
 // the experiment directory tree. Refuses (returns {ok:false}) if any
 // variant is mid-cycle, before touching anything. Directory deletion only
 // ever targets <experimentsRoot>/<expId> - never an arbitrary project dir.
-function deleteExperiment(scheduler, expId, deleteDirs) {
+function deleteExperiment(scheduler, expId, deleteDirs, removeContainers) {
   const experiments = loadExperiments();
   const exp = experiments.find((e) => e.id === expId);
   if (!exp) return { ok: false, error: 'unknown experiment' };
@@ -270,6 +339,8 @@ function deleteExperiment(scheduler, expId, deleteDirs) {
       util.log('experiments: removeProject failed for', v.projectId, String(err && err.message));
     }
   }
+
+  if (removeContainers) teardownContainers(exp);
 
   if (deleteDirs) {
     const expDir = path.join(experimentsRoot(), expId);
@@ -324,6 +395,9 @@ function resolvePreviewPath(expId, label, rest) {
 }
 
 module.exports = {
+  applyTemplate,
+  teardownPlan,
+  teardownContainers,
   loadExperiments,
   saveExperiments,
   getExperiment,

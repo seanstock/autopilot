@@ -552,3 +552,120 @@ test('scheduler-driven run: 2-variant experiment with cycleCap 1 disables both v
   const exp = list.find((e) => e.id === record.id);
   assert.equal(exp.complete, true);
 });
+
+// ---------------------------------------------------------------------------
+// server experiments (local Docker, KISS v1): port leases + templating +
+// container teardown
+// ---------------------------------------------------------------------------
+
+test('portBase leases sequential ports, names containers, substitutes {{PORT}}/{{LABEL}}/{{CONTAINER}}', () => {
+  tempHome();
+  tempExperimentsRoot();
+  const sched = makeScheduler();
+  const record = experiments.createExperiment(
+    sched,
+    basicBody({
+      portBase: 8200,
+      basePrompt: 'Serve on {{PORT}} as {{CONTAINER}} ({{LABEL}}).',
+      defaults: { verifyCmd: 'curl -sf http://127.0.0.1:{{PORT}}/healthz' },
+      variants: [
+        { label: 'a', overrides: {}, promptSuffix: 'You are {{LABEL}}.' },
+        { label: 'b', overrides: {}, promptSuffix: '' },
+      ],
+    })
+  );
+
+  assert.equal(record.portBase, 8200);
+  assert.equal(record.variants[0].port, 8200);
+  assert.equal(record.variants[1].port, 8201);
+  assert.equal(record.variants[0].container, `exp-${record.id}-a`);
+  assert.equal(record.variants[1].container, `exp-${record.id}-b`);
+
+  const p0 = state.getProject(sched.stateObj, record.variants[0].projectId);
+  assert.equal(p0.prompt, `Serve on 8200 as exp-${record.id}-a (a).\n\nYou are a.`);
+  assert.equal(p0.verifyCmd, 'curl -sf http://127.0.0.1:8200/healthz');
+  const p1 = state.getProject(sched.stateObj, record.variants[1].projectId);
+  assert.equal(p1.verifyCmd, 'curl -sf http://127.0.0.1:8201/healthz');
+
+  const list = experiments.listExperiments(sched);
+  const exp = list.find((e) => e.id === record.id);
+  assert.equal(exp.portBase, 8200);
+  assert.equal(exp.variants[0].port, 8200);
+  assert.equal(exp.variants[1].container, `exp-${record.id}-b`);
+});
+
+test('static experiments (no portBase) leave placeholders untouched and ports null', () => {
+  tempHome();
+  tempExperimentsRoot();
+  const sched = makeScheduler();
+  const record = experiments.createExperiment(
+    sched,
+    basicBody({ basePrompt: 'Literal {{PORT}} stays.' })
+  );
+  assert.equal(record.portBase, null);
+  assert.equal(record.variants[0].port, null);
+  assert.equal(record.variants[0].container, null);
+  const p = state.getProject(sched.stateObj, record.variants[0].projectId);
+  assert.equal(p.prompt, 'Literal {{PORT}} stays.');
+});
+
+test('invalid portBase is rejected with 400 and nothing written', () => {
+  tempHome();
+  const root = tempExperimentsRoot();
+  const sched = makeScheduler();
+  for (const bad of [80, 'abc', 99999, 12.5]) {
+    assert.throws(
+      () => experiments.createExperiment(sched, basicBody({ portBase: bad })),
+      (err) => err.status === 400,
+      `portBase ${bad} rejected`
+    );
+  }
+  assert.equal(sched.stateObj.projects.length, 0);
+  assert.equal(fs.readdirSync(root).length, 0);
+  assert.equal(experiments.loadExperiments().length, 0);
+});
+
+test('teardownPlan returns only strictly-valid exp-* container names', () => {
+  const exp = {
+    variants: [
+      { container: 'exp-robots-a' },
+      { container: 'exp-robots-b-2' },
+      { container: null },
+      { container: 'not-exp-name' },
+      { container: 'exp-robots-a; rm -rf /' },
+      { container: 'exp--double' },
+      { container: 'exp-UPPER' },
+    ],
+  };
+  assert.deepEqual(experiments.teardownPlan(exp), ['exp-robots-a', 'exp-robots-b-2']);
+  assert.deepEqual(experiments.teardownPlan(null), []);
+});
+
+test('teardownContainers invokes the runner once per valid container, tolerating failures', () => {
+  const calls = [];
+  experiments.teardownContainers(
+    { variants: [{ container: 'exp-x-a' }, { container: 'exp-x-b' }, { container: 'bad name' }] },
+    (args) => {
+      calls.push(args);
+      return args[2] === 'exp-x-b' ? { status: 1, stderr: 'no such container' } : { status: 0 };
+    }
+  );
+  assert.deepEqual(calls, [
+    ['rm', '-f', 'exp-x-a'],
+    ['rm', '-f', 'exp-x-b'],
+  ]);
+});
+
+test('deleteExperiment with removeContainers runs docker teardown for server experiments only', () => {
+  tempHome();
+  tempExperimentsRoot();
+  const sched = makeScheduler();
+  const record = experiments.createExperiment(sched, basicBody({ portBase: 8300 }));
+  // Not asserting real docker here: prove the wiring by checking the flag
+  // path doesn't throw with docker likely absent (teardown is best-effort)
+  // and the registry cleanup still completes.
+  const result = experiments.deleteExperiment(sched, record.id, false, true);
+  assert.equal(result.ok, true);
+  assert.equal(experiments.loadExperiments().length, 0);
+  assert.equal(sched.stateObj.projects.length, 0);
+});
