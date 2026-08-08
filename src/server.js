@@ -290,6 +290,40 @@ function startServer({ scheduler, port }) {
       return serveFile(res, path.join(UI_DIR, 'mock-status.json'), 'application/json; charset=utf-8');
     }
 
+    // ---- directory browser (add-project modal) -----------------------------
+    // Lists SUBDIRECTORIES only, for picking a project dir in the UI. The
+    // daemon already runs with the user's full filesystem rights and the
+    // server is loopback + Host-guarded, so this exposes nothing the UI's
+    // owner cannot already see; still, it never lists files, never reads
+    // contents, and never follows the request into a non-directory.
+    if (method === 'GET' && pathname === '/api/fs/dirs') {
+      const os = require('os');
+      const requested = query.get('path') || os.homedir();
+      let resolved;
+      try {
+        resolved = fs.realpathSync(path.resolve(requested));
+        if (!fs.statSync(resolved).isDirectory()) throw new Error('not a directory');
+      } catch (err) {
+        return sendJson(res, 400, { error: 'not a readable directory' });
+      }
+      let names = [];
+      try {
+        names = fs
+          .readdirSync(resolved, { withFileTypes: true })
+          .filter((d) => d.isDirectory() && !d.name.startsWith('.') && d.name !== 'node_modules')
+          .map((d) => d.name)
+          .sort((a, b) => a.localeCompare(b));
+      } catch (err) {
+        return sendJson(res, 400, { error: 'cannot list directory' });
+      }
+      const parent = path.dirname(resolved);
+      return sendJson(res, 200, {
+        path: resolved.replace(/\\/g, '/'),
+        parent: parent === resolved ? null : parent.replace(/\\/g, '/'),
+        dirs: names,
+      });
+    }
+
     // ---- experiments -------------------------------------------------------
     if (pathname === '/api/experiments') {
       if (method === 'GET') {
