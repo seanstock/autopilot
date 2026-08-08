@@ -169,30 +169,90 @@ function readOrders(dir) {
   return orders;
 }
 
-// Blocks until the user picks a folder or cancels. A hidden topmost owner
-// form keeps the dialog in front instead of behind the browser.
+// Blocks until the user picks a folder or cancels. Windows PowerShell 5.1's
+// WinForms FolderBrowserDialog is the 1990s tree widget, so this goes
+// straight to the modern shell IFileDialog (what Explorer itself uses) via
+// COM interop - full modern picker, address bar, New Folder, the lot.
+const PICKER_PS_SCRIPT = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IFileDialog {
+  [PreserveSig] uint Show(IntPtr hwndParent);
+  void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+  void SetFileTypeIndex(uint iFileType);
+  void GetFileTypeIndex(out uint piFileType);
+  void Advise(IntPtr pfde, out uint pdwCookie);
+  void Unadvise(uint dwCookie);
+  void SetOptions(uint fos);
+  void GetOptions(out uint pfos);
+  void SetDefaultFolder(IShellItem psi);
+  void SetFolder(IShellItem psi);
+  void GetFolder(out IShellItem ppsi);
+  void GetCurrentSelection(out IShellItem ppsi);
+  void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+  void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+  void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+  void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+  void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+  void GetResult(out IShellItem ppsi);
+  void AddPlace(IShellItem psi, int fdap);
+  void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
+  void Close(int hr);
+  void SetClientGuid(ref Guid guid);
+  void ClearClientData();
+  void SetFilter(IntPtr pFilter);
+}
+
+[ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IShellItem {
+  void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+  void GetParent(out IShellItem ppsi);
+  void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+  void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+  void Compare(IShellItem psi, uint hint, out int piOrder);
+}
+
+[ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")]
+public class FileOpenDialogRCW {}
+
+public static class FolderPicker {
+  public static string Pick() {
+    IFileDialog dlg = (IFileDialog)new FileOpenDialogRCW();
+    uint opts;
+    dlg.GetOptions(out opts);
+    // FOS_PICKFOLDERS (0x20) | FOS_FORCEFILESYSTEM (0x40)
+    dlg.SetOptions(opts | 0x20u | 0x40u);
+    dlg.SetTitle("Select the project directory for Autopilot");
+    if (dlg.Show(IntPtr.Zero) != 0) return null; // canceled
+    IShellItem item;
+    dlg.GetResult(out item);
+    string path;
+    item.GetDisplayName(0x80058000u, out path); // SIGDN_FILESYSPATH
+    return path;
+  }
+}
+"@
+$p = [FolderPicker]::Pick()
+if ($p) { [Console]::Out.Write($p) }
+`;
+
 function openNativeFolderPicker() {
   const { spawn } = require('child_process');
-  const script = [
-    'Add-Type -AssemblyName System.Windows.Forms;',
-    '$f = New-Object System.Windows.Forms.Form;',
-    '$f.TopMost = $true; $f.ShowInTaskbar = $false;',
-    '$f.WindowState = "Minimized"; $f.Opacity = 0;',
-    '$d = New-Object System.Windows.Forms.FolderBrowserDialog;',
-    "$d.Description = 'Select the project directory for Autopilot';",
-    '$d.ShowNewFolderButton = $true;',
-    "if ($d.ShowDialog($f) -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }",
-  ].join(' ');
   return new Promise((resolve, reject) => {
-    const child = spawn('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
+    const child = spawn('powershell.exe', ['-NoProfile', '-STA', '-Command', PICKER_PS_SCRIPT], {
       windowsHide: true,
       timeout: 5 * 60 * 1000,
     });
     let out = '';
+    let errOut = '';
     child.stdout.on('data', (c) => (out += c));
+    child.stderr.on('data', (c) => (errOut += c));
     child.on('error', reject);
     child.on('close', (code) => {
-      if (code !== 0) return reject(new Error(`picker exited ${code}`));
+      if (code !== 0) return reject(new Error(`picker exited ${code}: ${errOut.slice(0, 300)}`));
       resolve(out.trim() || null);
     });
   });
