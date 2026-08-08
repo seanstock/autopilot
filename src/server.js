@@ -169,6 +169,37 @@ function readOrders(dir) {
   return orders;
 }
 
+// Blocks until the user picks a folder or cancels. A hidden topmost owner
+// form keeps the dialog in front instead of behind the browser.
+function openNativeFolderPicker() {
+  const { spawn } = require('child_process');
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms;',
+    '$f = New-Object System.Windows.Forms.Form;',
+    '$f.TopMost = $true; $f.ShowInTaskbar = $false;',
+    '$f.WindowState = "Minimized"; $f.Opacity = 0;',
+    '$d = New-Object System.Windows.Forms.FolderBrowserDialog;',
+    "$d.Description = 'Select the project directory for Autopilot';",
+    '$d.ShowNewFolderButton = $true;',
+    "if ($d.ShowDialog($f) -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }",
+  ].join(' ');
+  return new Promise((resolve, reject) => {
+    const child = spawn('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
+      windowsHide: true,
+      timeout: 5 * 60 * 1000,
+    });
+    let out = '';
+    child.stdout.on('data', (c) => (out += c));
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) return reject(new Error(`picker exited ${code}`));
+      resolve(out.trim() || null);
+    });
+  });
+}
+
+let pickerBusy = false;
+
 function startServer({ scheduler, port }) {
   const sseClients = new Set();
 
@@ -290,38 +321,25 @@ function startServer({ scheduler, port }) {
       return serveFile(res, path.join(UI_DIR, 'mock-status.json'), 'application/json; charset=utf-8');
     }
 
-    // ---- directory browser (add-project modal) -----------------------------
-    // Lists SUBDIRECTORIES only, for picking a project dir in the UI. The
-    // daemon already runs with the user's full filesystem rights and the
-    // server is loopback + Host-guarded, so this exposes nothing the UI's
-    // owner cannot already see; still, it never lists files, never reads
-    // contents, and never follows the request into a non-directory.
-    if (method === 'GET' && pathname === '/api/fs/dirs') {
-      const os = require('os');
-      const requested = query.get('path') || os.homedir();
-      let resolved;
+    // ---- native folder picker (add-project modal) --------------------------
+    // The daemon runs in the user's own desktop session, so it can open the
+    // real Windows folder-picker dialog (with its Make New Folder button)
+    // and return the chosen absolute path - something a browser page can
+    // never obtain on its own. One dialog at a time; the request blocks
+    // until the user picks or cancels (up to 5 minutes).
+    if (method === 'POST' && pathname === '/api/fs/pick') {
+      if (process.platform !== 'win32') return sendJson(res, 501, { error: 'native picker is Windows-only' });
+      if (pickerBusy) return sendJson(res, 409, { error: 'a picker dialog is already open' });
+      pickerBusy = true;
       try {
-        resolved = fs.realpathSync(path.resolve(requested));
-        if (!fs.statSync(resolved).isDirectory()) throw new Error('not a directory');
+        const picked = await openNativeFolderPicker();
+        return sendJson(res, 200, picked ? { path: picked.replace(/\\/g, '/') } : { canceled: true });
       } catch (err) {
-        return sendJson(res, 400, { error: 'not a readable directory' });
+        util.log('server: folder picker failed', String((err && err.message) || err));
+        return sendJson(res, 500, { error: 'picker failed' });
+      } finally {
+        pickerBusy = false;
       }
-      let names = [];
-      try {
-        names = fs
-          .readdirSync(resolved, { withFileTypes: true })
-          .filter((d) => d.isDirectory() && !d.name.startsWith('.') && d.name !== 'node_modules')
-          .map((d) => d.name)
-          .sort((a, b) => a.localeCompare(b));
-      } catch (err) {
-        return sendJson(res, 400, { error: 'cannot list directory' });
-      }
-      const parent = path.dirname(resolved);
-      return sendJson(res, 200, {
-        path: resolved.replace(/\\/g, '/'),
-        parent: parent === resolved ? null : parent.replace(/\\/g, '/'),
-        dirs: names,
-      });
     }
 
     // ---- experiments -------------------------------------------------------

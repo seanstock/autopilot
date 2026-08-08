@@ -577,32 +577,3 @@ test('preview route: bare path redirects to trailing slash; trailing slash serve
     cleanupRealScheduler(ctx);
   }
 });
-
-// ---------------------------------------------------------------------------
-// /api/fs/dirs (directory browser for the add-project modal)
-// ---------------------------------------------------------------------------
-
-test('GET /api/fs/dirs lists subdirectories only, with parent', async () => {
-  const sched = makeFakeScheduler([]);
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-fsdirs-'));
-  fs.mkdirSync(path.join(base, 'beta'));
-  fs.mkdirSync(path.join(base, 'alpha'));
-  fs.mkdirSync(path.join(base, '.hidden'));
-  fs.mkdirSync(path.join(base, 'node_modules'));
-  fs.writeFileSync(path.join(base, 'a-file.txt'), 'x');
-
-  await withServer(sched, async (port) => {
-    const res = await requestRaw(port, 'GET', '/api/fs/dirs?path=' + encodeURIComponent(base));
-    assert.equal(res.status, 200);
-    assert.deepEqual(res.body.dirs, ['alpha', 'beta'], 'files, dotdirs and node_modules excluded');
-    assert.ok(res.body.parent, 'parent present');
-    assert.ok(!res.body.path.includes('\\'), 'forward slashes');
-
-    const bad = await requestRaw(port, 'GET', '/api/fs/dirs?path=' + encodeURIComponent(path.join(base, 'a-file.txt')));
-    assert.equal(bad.status, 400, 'a file is not a browsable directory');
-
-    const missing = await requestRaw(port, 'GET', '/api/fs/dirs?path=' + encodeURIComponent(path.join(base, 'nope')));
-    assert.equal(missing.status, 400);
-  });
-  fs.rmSync(base, { recursive: true, force: true });
-});
