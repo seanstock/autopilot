@@ -1082,12 +1082,12 @@ function optionList(values, current, blankLabel) {
   return html;
 }
 
-// Worker-model choices. The local model is offered only while the daemon can
-// actually reach it (src/localmodel.js checks the server AND that routing is
-// configured); an option whose cycles would all fail is worse than no option.
-// Orchestrator models are deliberately left alone - the local model is for
-// subagent work, with a Claude model still doing the planning.
-function workerModelOpts() {
+// Model choices, for both the orchestrator and the worker. The local model is
+// offered only while the daemon can actually reach it (src/localmodel.js probes
+// the inference server and the router); an option whose cycles would all fail
+// is worse than no option. runner.js routes any cycle whose effective model is
+// the local one, so orchestrate cycles work the same way worker cycles do.
+function modelOptsWithLocal() {
   const lm = status && status.localModel;
   if (lm && lm.available) return [{ value: lm.id, label: lm.label, local: true }].concat(MODEL_OPTS);
   return MODEL_OPTS;
@@ -1102,9 +1102,9 @@ function renderConfigCard(p) {
     <div class="card">
       <h3>Config <span class="sub">applies on the next cycle</span></h3>
       <div class="cfg-grid">
-        <label>Model (orchestrator)<select id="cfg-model">${optionList(MODEL_OPTS, p.model, null)}</select></label>
+        <label>Model (orchestrator)<select id="cfg-model">${optionList(modelOptsWithLocal(), p.model, null)}</select></label>
         <label>Effort<select id="cfg-effort">${optionList(EFFORT_OPTS, p.effort || '', 'default')}</select></label>
-        <label>Worker model<select id="cfg-worker">${optionList(workerModelOpts(), p.workerModel || '', 'none (not orchestrated)')}</select></label>
+        <label>Worker model<select id="cfg-worker">${optionList(modelOptsWithLocal(), p.workerModel || '', 'none (not orchestrated)')}</select></label>
         <label>Worker effort<select id="cfg-worker-effort">${optionList(EFFORT_OPTS, p.workerEffort || '', 'inherit')}</select></label>
         <label>Critic ratio<input type="number" id="cfg-critic" min="0" value="${safeNum(p.criticRatio, 0)}"></label>
         <label>Review gate<input type="number" id="cfg-gate" min="0" value="${safeNum(p.reviewGateCycles, 0)}"></label>
@@ -1761,14 +1761,16 @@ async function submitExp(ev) {
 /* ============================================================
    Status apply / SSE
    ============================================================ */
-// Both worker selects are reconciled in place rather than re-rendered. The
+// Every model select is reconciled in place rather than re-rendered. The
 // add-project form is static markup, and the config card holds other unsaved
 // edits (critic ratio, review gate) that a re-render would discard - so the
 // single local-model option is added/removed surgically on every status tick.
+const LOCAL_MODEL_SELECTS = ['f-model', 'f-worker', 'cfg-model', 'cfg-worker'];
+
 function syncLocalModelOptions() {
   const lm = status && status.localModel;
 
-  for (const id of ['f-worker', 'cfg-worker']) {
+  for (const id of LOCAL_MODEL_SELECTS) {
     const sel = document.getElementById(id);
     if (!sel) continue; // config card only exists while a project is selected
     const existing = sel.querySelector('option[data-local="1"]');
@@ -1782,7 +1784,10 @@ function syncLocalModelOptions() {
         opt.value = lm.id;
         opt.textContent = lm.label;
         opt.dataset.local = '1';
-        sel.insertBefore(opt, sel.options[1] || null); // just under "none"
+        // Sit under the blank "none" entry on the worker selects, but at the
+        // very top on the orchestrator selects, which have no blank entry.
+        const hasBlank = sel.options.length && sel.options[0].value === '';
+        sel.insertBefore(opt, hasBlank ? (sel.options[1] || null) : (sel.options[0] || null));
       }
     } else if (existing) {
       // Don't yank a selection out from under someone mid-edit; mark it so
