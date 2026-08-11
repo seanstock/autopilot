@@ -34,6 +34,7 @@ const state = require('./state');
 const events = require('./events');
 const runner = require('./runner');
 const notifyModule = require('./notify');
+const localmodel = require('./localmodel');
 
 const DAEMON_PID_FILENAME = 'daemon.pid';
 const VERSION = '0.2.0';
@@ -236,6 +237,10 @@ class Scheduler extends EventEmitter {
     this.budget = o.budget;
     this.runCycleImpl = o.runCycleImpl || runner.runCycle;
     this.notifyImpl = o.notifyImpl || notifyModule.notify;
+    // Availability of a locally-served model, surfaced in snapshot() so the UI
+    // can offer it as a worker model only while it can actually be reached.
+    // Injectable for tests; real callers get the shared cached probe.
+    this.localModel = o.localModel || localmodel.shared();
     this.tickMs = o.tickMs != null ? o.tickMs : 5000;
     // Test-only, documented extension (same pattern as budget.js's
     // minIntervalMs/backoffBaseMs): lets I1 tests observe the sticky-probe
@@ -963,6 +968,7 @@ class Scheduler extends EventEmitter {
         paused: this.paused,
       },
       fatal: fatalRecord,
+      localModel: this.localModel.current(),
       budget: {
         ok: this._lastBudget.ok,
         reason: this._lastBudget.reason,

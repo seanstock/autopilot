@@ -993,7 +993,14 @@ test('snapshot matches the shared status contract shape', async () => {
   });
 
   const snap = sched.snapshot();
-  assert.deepEqual(Object.keys(snap).sort(), ['budget', 'concurrency', 'current', 'daemon', 'fatal', 'projects', 'running', 'settings', 'totals'].sort());
+  // 'localModel' joined this list when Autopilot learned to run cycles against
+  // a model served on this machine. The original list was deliberately exact so
+  // that a field added to the snapshot has to be justified here rather than
+  // appearing silently; that reasoning still holds, hence the edit rather than
+  // a loosened assertion. See src/localmodel.js for why availability is a
+  // probe plus an ANTHROPIC_BASE_URL check rather than just a probe.
+  assert.deepEqual(Object.keys(snap).sort(), ['budget', 'concurrency', 'current', 'daemon', 'fatal', 'localModel', 'projects', 'running', 'settings', 'totals'].sort());
+  assert.deepEqual(Object.keys(snap.localModel).sort(), ['available', 'id', 'label', 'reason'].sort());
   assert.deepEqual(Object.keys(snap.daemon).sort(), ['pid', 'startedIso', 'version', 'paused'].sort());
   assert.deepEqual(Object.keys(snap.budget).sort(), ['ok', 'reason', 'checkedIso', 'windows'].sort());
   // 'notes' is the shared "things to know" prepended to every project's

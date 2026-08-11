@@ -50,6 +50,9 @@ async function main() {
       JSON.stringify({
         ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || null,
         ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN || null,
+        // Injected by the runner for local-model cycles only, so tests can
+        // assert Claude-model cycles are left pointing at Anthropic.
+        ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL || null,
         argv: process.argv.slice(2),
       })
     );

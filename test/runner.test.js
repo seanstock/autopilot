@@ -558,3 +558,72 @@ test('runCycle never throws even when claudeCmd points at a nonexistent binary',
     assert.equal(result.exit, 'crash');
   });
 });
+
+// ---- local-model routing ---------------------------------------------------
+// Autopilot can run a cycle against a model served on this machine. The CLI is
+// pointed at the local router by injecting ANTHROPIC_BASE_URL into the child
+// env, and that is done per cycle rather than by requiring the daemon to be
+// launched with the variable already set - so it survives reboots and any
+// launch path. It is scoped to local-model cycles so a dead router cannot
+// break ordinary Claude cycles.
+
+test('a Claude-model cycle is NOT redirected (dead router cannot break it)', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir); // model: claude-sonnet-5
+  const budget = mockBudget();
+
+  await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'work', cycleNumber: 1, budget, claudeCmd: fakeCmd(), order: null })
+  );
+
+  const seen = JSON.parse(fs.readFileSync(path.join(dir, 'env_seen.json'), 'utf8'));
+  const localmodel = require('../src/localmodel');
+  // The invariant is "the runner did not redirect this cycle", not "the value
+  // is empty": whatever the daemon inherited passes through untouched. Asserting
+  // null here fails on any machine whose environment already sets the variable
+  // (Claude Desktop sets it to the production endpoint, for one).
+  assert.equal(seen.ANTHROPIC_BASE_URL, process.env.ANTHROPIC_BASE_URL || null,
+    'a Claude-model cycle must inherit the ambient endpoint unchanged');
+  assert.notEqual(seen.ANTHROPIC_BASE_URL, localmodel.readConfig().routerUrl,
+    'a Claude-model cycle must never be sent through the local router');
+});
+
+test('a local-model cycle is pointed at the local router', async () => {
+  const dir = tempProjectRepo();
+  const localmodel = require('../src/localmodel');
+  const cfg = localmodel.readConfig();
+  const project = baseProject(dir, { model: cfg.id });
+  const budget = mockBudget();
+
+  await withFakeMode('clean', () =>
+    runCycle({ project, kind: 'work', cycleNumber: 1, budget, claudeCmd: fakeCmd(), order: null })
+  );
+
+  const seen = JSON.parse(fs.readFileSync(path.join(dir, 'env_seen.json'), 'utf8'));
+  assert.equal(seen.ANTHROPIC_BASE_URL, cfg.routerUrl);
+});
+
+// scheduler.js swaps workerModel into cycleProject.model for worker cycles, so
+// a subagent running the local model arrives here indistinguishable from any
+// other local-model cycle. This pins that contract from the runner's side.
+test('a worker cycle carrying the local model is redirected too', async () => {
+  const dir = tempProjectRepo();
+  const localmodel = require('../src/localmodel');
+  const cfg = localmodel.readConfig();
+  const project = baseProject(dir, { model: cfg.id, workerModel: cfg.id });
+  const budget = mockBudget();
+
+  await withFakeMode('clean', () =>
+    runCycle({
+      project,
+      kind: 'work',
+      cycleNumber: 1,
+      budget,
+      claudeCmd: fakeCmd(),
+      order: { id: 'o1', content: 'do the thing' },
+    })
+  );
+
+  const seen = JSON.parse(fs.readFileSync(path.join(dir, 'env_seen.json'), 'utf8'));
+  assert.equal(seen.ANTHROPIC_BASE_URL, cfg.routerUrl);
+});

@@ -20,6 +20,7 @@ const util = require('./util');
 const events = require('./events');
 const preambles = require('./preambles');
 const containment = require('./containment');
+const localmodel = require('./localmodel');
 
 // Exit-condition regexes (SPEC.md section 4: never guess from exit codes
 // alone - context-full and usage-limit both return nonzero, and message
@@ -445,6 +446,21 @@ async function runCycle(opts) {
   const env = Object.assign({}, process.env);
   delete env.ANTHROPIC_API_KEY;
   delete env.ANTHROPIC_AUTH_TOKEN;
+
+  // A model served on this machine is reached by pointing the CLI at the local
+  // router, and that happens HERE, per cycle, rather than by requiring the
+  // daemon to have been launched with ANTHROPIC_BASE_URL set. Two reasons:
+  //   - it survives reboots and every launch path (scheduled task, manual,
+  //     boot), so the UI option is governed purely by whether the servers are
+  //     up, which is the behaviour that was actually asked for;
+  //   - it is scoped to local-model cycles, so Claude-model cycles keep going
+  //     straight to Anthropic and a dead router cannot break them.
+  // project.model is the EFFECTIVE model for this cycle - scheduler.js swaps in
+  // workerModel for worker cycles - so subagent cycles are covered too.
+  const lm = localmodel.readConfig();
+  if (project.model && project.model === lm.id) {
+    env.ANTHROPIC_BASE_URL = lm.routerUrl;
+  }
 
   const maxCycleMinutes = typeof project.maxCycleMinutes === 'number' && project.maxCycleMinutes > 0
     ? project.maxCycleMinutes

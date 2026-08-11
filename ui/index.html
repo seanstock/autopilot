@@ -1004,14 +1004,33 @@ function renderTailLine(raw) {
 const MODEL_OPTS = ['claude-opus-5', 'claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'];
 const EFFORT_OPTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
+// Accepts plain strings, or {value,label} when the option needs to display
+// something other than the raw model id (the local model shows a friendly
+// name). String lists behave exactly as before.
 function optionList(values, current, blankLabel) {
+  const opts = values.map(v => (typeof v === 'string' ? { value: v, label: v } : v));
   // Ensure a current value not in the canonical list still appears/selects.
-  const list = (current && values.indexOf(current) === -1) ? [current].concat(values) : values;
+  const list = (current && !opts.some(o => o.value === current))
+    ? [{ value: current, label: current }].concat(opts)
+    : opts;
   let html = blankLabel != null ? `<option value=""${current ? '' : ' selected'}>${escapeHtml(blankLabel)}</option>` : '';
-  for (const v of list) {
-    html += `<option value="${escapeHtml(v)}"${v === current ? ' selected' : ''}>${escapeHtml(v)}</option>`;
+  for (const o of list) {
+    // data-local marks the locally-served entry so syncLocalModelOptions() can
+    // find and reconcile it later without re-rendering the whole card.
+    html += `<option value="${escapeHtml(o.value)}"${o.local ? ' data-local="1"' : ''}${o.value === current ? ' selected' : ''}>${escapeHtml(o.label)}</option>`;
   }
   return html;
+}
+
+// Worker-model choices. The local model is offered only while the daemon can
+// actually reach it (src/localmodel.js checks the server AND that routing is
+// configured); an option whose cycles would all fail is worse than no option.
+// Orchestrator models are deliberately left alone - the local model is for
+// subagent work, with a Claude model still doing the planning.
+function workerModelOpts() {
+  const lm = status && status.localModel;
+  if (lm && lm.available) return [{ value: lm.id, label: lm.label, local: true }].concat(MODEL_OPTS);
+  return MODEL_OPTS;
 }
 
 // Editable per-project config. Model (orchestrator/main), effort, and -
@@ -1025,7 +1044,7 @@ function renderConfigCard(p) {
       <div class="cfg-grid">
         <label>Model (orchestrator)<select id="cfg-model">${optionList(MODEL_OPTS, p.model, null)}</select></label>
         <label>Effort<select id="cfg-effort">${optionList(EFFORT_OPTS, p.effort || '', 'default')}</select></label>
-        <label>Worker model<select id="cfg-worker">${optionList(MODEL_OPTS, p.workerModel || '', 'none (not orchestrated)')}</select></label>
+        <label>Worker model<select id="cfg-worker">${optionList(workerModelOpts(), p.workerModel || '', 'none (not orchestrated)')}</select></label>
         <label>Worker effort<select id="cfg-worker-effort">${optionList(EFFORT_OPTS, p.workerEffort || '', 'inherit')}</select></label>
         <label>Critic ratio<input type="number" id="cfg-critic" min="0" value="${safeNum(p.criticRatio, 0)}"></label>
         <label>Review gate<input type="number" id="cfg-gate" min="0" value="${safeNum(p.reviewGateCycles, 0)}"></label>
@@ -1682,12 +1701,45 @@ async function submitExp(ev) {
 /* ============================================================
    Status apply / SSE
    ============================================================ */
+// Both worker selects are reconciled in place rather than re-rendered. The
+// add-project form is static markup, and the config card holds other unsaved
+// edits (critic ratio, review gate) that a re-render would discard - so the
+// single local-model option is added/removed surgically on every status tick.
+function syncLocalModelOptions() {
+  const lm = status && status.localModel;
+
+  for (const id of ['f-worker', 'cfg-worker']) {
+    const sel = document.getElementById(id);
+    if (!sel) continue; // config card only exists while a project is selected
+    const existing = sel.querySelector('option[data-local="1"]');
+
+    if (lm && lm.available) {
+      if (existing) {
+        existing.value = lm.id;
+        existing.textContent = lm.label;
+      } else {
+        const opt = document.createElement('option');
+        opt.value = lm.id;
+        opt.textContent = lm.label;
+        opt.dataset.local = '1';
+        sel.insertBefore(opt, sel.options[1] || null); // just under "none"
+      }
+    } else if (existing) {
+      // Don't yank a selection out from under someone mid-edit; mark it so
+      // saving an offline model is at least a visible choice.
+      if (existing.selected) existing.textContent = `${lm ? lm.label : existing.value} (offline)`;
+      else existing.remove();
+    }
+  }
+}
+
 function applyStatus(newStatus) {
   status = newStatus;
   const scrollY = window.scrollY;
   renderHeader();
   renderProjectList();
   updateDetailHead();
+  syncLocalModelOptions();
   window.scrollTo(0, scrollY);
 }
 
