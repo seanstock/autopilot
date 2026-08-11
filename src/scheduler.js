@@ -1037,6 +1037,14 @@ class Scheduler extends EventEmitter {
 
   // ---- commands (used by server.js) ---------------------------------------
 
+  // Launch the local inference server + router. Returns {ok} / {ok:false,error}
+  // immediately; readiness shows up later via localModel.available.
+  startLocalModel() {
+    const r = this.localModel.start();
+    if (r.ok) this._emitStatusIfChanged(); // flip the UI to "starting" at once
+    return r;
+  }
+
   pauseAll() {
     if (!this.paused) {
       this.paused = true;

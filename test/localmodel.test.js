@@ -157,3 +157,172 @@ test('concurrent refreshes collapse into one probe', async () => {
   await Promise.all([lm.refresh(), lm.refresh(), lm.refresh()]);
   assert.equal(calls, 1, 'in-flight probe must not be duplicated by status polls');
 });
+
+// ---- starting the model on demand ------------------------------------------
+
+function startable(opts) {
+  const o = opts || {};
+  const spawned = [];
+  const lm = new LocalModel({
+    env: Object.assign({ AUTOPILOT_LOCAL_MODEL_START: '/fake/start-all.ps1' }, ENV),
+    tcpProbe: async () => o.routerUp !== false,
+    httpProbe: async () => o.modelUp === true,
+    existsImpl: () => o.scriptExists !== false,
+    spawnImpl: (cmd) => { spawned.push(cmd); },
+    now: o.now,
+    startWindowMs: o.startWindowMs,
+  });
+  return { lm, spawned };
+}
+
+test('canStart is false when the start script is missing', () => {
+  const { lm } = startable({ scriptExists: false });
+  assert.equal(lm.canStart(), false);
+  const r = lm.start();
+  assert.equal(r.ok, false);
+  assert.match(r.error, /start script not found/);
+});
+
+test('start() launches the configured script', () => {
+  const { lm, spawned } = startable({});
+  assert.equal(lm.canStart(), true);
+  const r = lm.start();
+  assert.equal(r.ok, true);
+  assert.deepEqual(spawned, ['/fake/start-all.ps1']);
+});
+
+test('start() refuses while already starting, so double-clicks do not spawn twice', () => {
+  const { lm, spawned } = startable({});
+  assert.equal(lm.start().ok, true);
+  const second = lm.start();
+  assert.equal(second.ok, false);
+  assert.match(second.error, /already starting/);
+  assert.equal(spawned.length, 1);
+});
+
+test('start() refuses when the model is already running', async () => {
+  const { lm, spawned } = startable({ modelUp: true });
+  await lm.refresh();
+  const r = lm.start();
+  assert.equal(r.ok, false);
+  assert.match(r.error, /already running/);
+  assert.equal(spawned.length, 0);
+});
+
+test('isStarting() clears once the model answers', async () => {
+  let modelUp = false;
+  const lm = new LocalModel({
+    env: Object.assign({ AUTOPILOT_LOCAL_MODEL_START: '/fake/start-all.ps1' }, ENV),
+    tcpProbe: async () => true,
+    httpProbe: async () => modelUp,
+    existsImpl: () => true,
+    spawnImpl: () => {},
+  });
+  await lm.refresh();
+  assert.equal(lm.start().ok, true);
+  assert.equal(lm.isStarting(), true);
+
+  modelUp = true;
+  await lm.refresh();
+  assert.equal(lm.isStarting(), false, 'a running model is not still "starting"');
+});
+
+test('isStarting() lapses after the start window so the button comes back', () => {
+  let clock = 1000;
+  const { lm } = startable({ now: () => clock, startWindowMs: 5000 });
+  assert.equal(lm.start().ok, true);
+  assert.equal(lm.isStarting(), true);
+  clock += 6000;
+  assert.equal(lm.isStarting(), false, 'a failed start must not wedge the UI forever');
+});
+
+test('current() exposes canStart and starting for the UI', () => {
+  const { lm } = startable({});
+  const s = lm.current();
+  assert.equal(s.canStart, true);
+  assert.equal(s.starting, false);
+  lm.start();
+  assert.equal(lm.current().starting, true);
+});
+
+// Regression: start() used to refuse on a STALE "available", so a server that
+// died seconds ago could not be restarted until the cache caught up. The
+// launcher is idempotent, so a stale cache must not block a start request.
+test('start() is allowed when the cached "available" has gone stale', async () => {
+  let clock = 1000;
+  let modelUp = true;
+  const spawned = [];
+  const lm = new LocalModel({
+    env: Object.assign({ AUTOPILOT_LOCAL_MODEL_START: '/fake/start-all.ps1' }, ENV),
+    tcpProbe: async () => true,
+    httpProbe: async () => modelUp,
+    existsImpl: () => true,
+    spawnImpl: (c) => { spawned.push(c); },
+    now: () => clock,
+    ttlMs: 5000,
+  });
+
+  await lm.refresh();
+  assert.equal(lm.start().ok, false, 'fresh + available still refuses');
+
+  modelUp = false;      // servers die...
+  clock += 10000;       // ...and the cached value goes stale
+  const r = lm.start();
+  assert.equal(r.ok, true, 'a stale cache must not block a restart');
+  assert.equal(spawned.length, 1);
+});
+
+// Regression: a failed spawn surfaces asynchronously on Windows, so start()
+// reported ok and the UI sat on "starting..." for the whole window in silence.
+test('an async spawn failure clears "starting" and is reported', async () => {
+  const { EventEmitter } = require('node:events');
+  const fake = new EventEmitter();
+  const lm = new LocalModel({
+    env: Object.assign({ AUTOPILOT_LOCAL_MODEL_START: '/fake/start-all.ps1' }, ENV),
+    tcpProbe: async () => false,
+    httpProbe: async () => false,
+    existsImpl: () => true,
+    spawnImpl: () => fake,
+  });
+
+  assert.equal(lm.start().ok, true);
+  assert.equal(lm.isStarting(), true);
+
+  fake.emit('error', new Error('ENOENT powershell'));
+  assert.equal(lm.isStarting(), false, 'must not claim to be starting after a failed launch');
+  assert.match(lm.current().startError, /could not launch: ENOENT powershell/);
+});
+
+test('a non-zero launcher exit is reported instead of silently hanging', () => {
+  const { EventEmitter } = require('node:events');
+  const fake = new EventEmitter();
+  const lm = new LocalModel({
+    env: Object.assign({ AUTOPILOT_LOCAL_MODEL_START: '/fake/start-all.ps1' }, ENV),
+    tcpProbe: async () => false,
+    httpProbe: async () => false,
+    existsImpl: () => true,
+    spawnImpl: () => fake,
+  });
+
+  assert.equal(lm.start().ok, true);
+  fake.emit('exit', 1);
+  assert.equal(lm.isStarting(), false);
+  assert.match(lm.current().startError, /launcher exited with code 1/);
+});
+
+test('a clean launcher exit (0) is normal and does not report an error', () => {
+  const { EventEmitter } = require('node:events');
+  const fake = new EventEmitter();
+  const lm = new LocalModel({
+    env: Object.assign({ AUTOPILOT_LOCAL_MODEL_START: '/fake/start-all.ps1' }, ENV),
+    tcpProbe: async () => false,
+    httpProbe: async () => false,
+    existsImpl: () => true,
+    spawnImpl: () => fake,
+  });
+
+  assert.equal(lm.start().ok, true);
+  fake.emit('exit', 0);   // launcher hands off and exits; servers still loading
+  assert.equal(lm.isStarting(), true, 'handing off is not failing');
+  assert.equal(lm.current().startError, null);
+});

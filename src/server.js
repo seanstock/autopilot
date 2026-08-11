@@ -589,6 +589,15 @@ function startServer({ scheduler, port }) {
       return sendJson(res, 200, scheduler.snapshot());
     }
 
+    // Bring the local inference server + router up on demand. Returns as soon
+    // as the launcher is spawned; the caller watches localModel.available in
+    // /api/status to see when it is actually ready.
+    if (method === 'POST' && pathname === '/api/localmodel/start') {
+      const r = scheduler.startLocalModel();
+      if (!r.ok) return sendJson(res, 409, { error: r.error });
+      return sendJson(res, 200, scheduler.snapshot());
+    }
+
     if (method === 'POST' && pathname === '/api/pause') {
       scheduler.pauseAll();
       return sendJson(res, 200, scheduler.snapshot());

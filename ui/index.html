@@ -270,6 +270,10 @@
         <button id="themeBtn" onclick="toggleTheme()" title="switch theme">light</button>
       </div>
       <div class="daemon"><span class="dot" id="daemonDot"></span><span id="daemonTxt">connecting...</span></div>
+      <div class="daemon localmodel" id="localModelRow" style="display:none">
+        <span class="dot" id="lmDot"></span><span id="lmTxt"></span>
+        <button id="lmStartBtn" onclick="startLocalModel()" style="display:none">start</button>
+      </div>
     </div>
 
     <div class="gauges" id="gauges"></div>
@@ -650,7 +654,63 @@ function renderHeader() {
     document.getElementById('concurrency').value = s.settings.concurrency;
   }
 
+  renderLocalModel();
   renderGauges();
+}
+
+// Local model line: state plus a start button. The row is hidden entirely when
+// there is no start script and the model is not running, so an install without
+// a local model shows nothing rather than a permanently dead control.
+function renderLocalModel() {
+  const lm = status && status.localModel;
+  const row = document.getElementById('localModelRow');
+  if (!row) return;
+  if (!lm || (!lm.available && !lm.canStart && !lm.starting)) {
+    row.style.display = 'none';
+    return;
+  }
+  row.style.display = '';
+
+  const dot = document.getElementById('lmDot');
+  const txt = document.getElementById('lmTxt');
+  const btn = document.getElementById('lmStartBtn');
+
+  dot.classList.remove('paused', 'fatal');
+  if (lm.starting) {
+    dot.classList.add('paused');
+    txt.textContent = `${lm.label} · starting, loading weights...`;
+  } else if (lm.available) {
+    txt.textContent = `${lm.label} · running`;
+  } else {
+    dot.classList.add('fatal');
+    const why = lm.startError ? lm.startError
+      : lm.reason === 'router-down' ? 'router not running'
+      : lm.reason === 'unreachable' ? 'model server not running'
+      : 'not running';
+    txt.textContent = `${lm.label} · ${why}`;
+  }
+
+  // Offered only when it could actually do something.
+  btn.style.display = (!lm.available && !lm.starting && lm.canStart) ? '' : 'none';
+  btn.disabled = false;
+}
+
+async function startLocalModel() {
+  const btn = document.getElementById('lmStartBtn');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/localmodel/start', { method: 'POST' });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      alert('Could not start the local model: ' + (body.error || r.status));
+      btn.disabled = false;
+      return;
+    }
+    applyStatus(await r.json());
+  } catch (err) {
+    alert('Could not start the local model: ' + err.message);
+    btn.disabled = false;
+  }
 }
 
 function updateDaemonLine() {
