@@ -21,6 +21,7 @@
 
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
@@ -486,40 +487,123 @@ async function cmdLogs(id) {
   await new Promise(() => {}); // run until Ctrl+C
 }
 
-function cmdBoot(onOff) {
-  if (process.platform !== 'win32') {
-    console.log('autopilot boot: not implemented for this OS');
-    return;
+// Pure: platform + action -> a plan for registering/removing a run-at-login
+// entry, or null when this platform has no supported mechanism. Split out from
+// cmdBoot so all three platforms are unit-testable from any one of them.
+//
+//   win32  - schtasks, ONLOGON scheduled task
+//   darwin - a launchd user agent plist in ~/Library/LaunchAgents, loaded with
+//            launchctl. RunAtLoad is the launchd equivalent of ONLOGON.
+//   linux  - a systemd user unit in ~/.config/systemd/user, enabled with
+//            `systemctl --user enable`. Covers mainstream desktop distros;
+//            systems without systemd get a clear message rather than silence.
+function buildBootPlan(platform, action, nodeExe, scriptPath, homeDir) {
+  const path = require('path');
+  if (action !== 'on' && action !== 'off') return null;
+
+  if (platform === 'win32') {
+    const tr = `"${nodeExe}" "${scriptPath}" daemon`;
+    return action === 'off'
+      ? { kind: 'exec', bin: 'schtasks', args: ['/Delete', '/TN', 'Autopilot', '/F'] }
+      : {
+        kind: 'exec',
+        bin: 'schtasks',
+        args: ['/Create', '/TN', 'Autopilot', '/TR', tr, '/SC', 'ONLOGON', '/RL', 'LIMITED', '/F'],
+      };
   }
+
+  if (platform === 'darwin') {
+    const label = 'com.autopilot.daemon';
+    const plistPath = path.join(homeDir, 'Library', 'LaunchAgents', `${label}.plist`);
+    if (action === 'off') {
+      return { kind: 'file+exec', remove: plistPath, bin: 'launchctl', args: ['unload', plistPath] };
+    }
+    const plist = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+      '<plist version="1.0">',
+      '<dict>',
+      '  <key>Label</key>',
+      `  <string>${label}</string>`,
+      '  <key>ProgramArguments</key>',
+      '  <array>',
+      `    <string>${nodeExe}</string>`,
+      `    <string>${scriptPath}</string>`,
+      '    <string>daemon</string>',
+      '  </array>',
+      '  <key>RunAtLoad</key>',
+      '  <true/>',
+      '</dict>',
+      '</plist>',
+      '',
+    ].join('\n');
+    return { kind: 'file+exec', write: plistPath, content: plist, bin: 'launchctl', args: ['load', plistPath] };
+  }
+
+  if (platform === 'linux') {
+    const unitPath = path.join(homeDir, '.config', 'systemd', 'user', 'autopilot.service');
+    if (action === 'off') {
+      return { kind: 'file+exec', remove: unitPath, bin: 'systemctl', args: ['--user', 'disable', 'autopilot.service'] };
+    }
+    const unit = [
+      '[Unit]',
+      'Description=Autopilot daemon',
+      '',
+      '[Service]',
+      `ExecStart=${nodeExe} ${scriptPath} daemon`,
+      'Restart=on-failure',
+      '',
+      '[Install]',
+      'WantedBy=default.target',
+      '',
+    ].join('\n');
+    return { kind: 'file+exec', write: unitPath, content: unit, bin: 'systemctl', args: ['--user', 'enable', '--now', 'autopilot.service'] };
+  }
+
+  return null;
+}
+
+function cmdBoot(onOff) {
   if (onOff !== 'on' && onOff !== 'off') {
     console.error('usage: autopilot boot on|off');
     process.exitCode = 1;
     return;
   }
 
-  if (onOff === 'off') {
-    const r = spawnSync('schtasks', ['/Delete', '/TN', 'Autopilot', '/F'], { windowsHide: true, encoding: 'utf8' });
-    if (r.status === 0) {
-      console.log('autopilot boot off: scheduled task removed');
-    } else {
-      console.error(`autopilot boot off: schtasks failed: ${(r.stderr || r.stdout || '').trim()}`);
-      process.exitCode = 1;
-    }
+  const plan = buildBootPlan(
+    process.platform, onOff, process.execPath, path.resolve(__filename), os.homedir()
+  );
+  if (!plan) {
+    console.log(`autopilot boot: not supported on ${process.platform}`);
     return;
   }
 
-  const nodeExe = process.execPath;
-  const scriptPath = path.resolve(__filename);
-  const tr = `"${nodeExe}" "${scriptPath}" daemon`;
-  const r = spawnSync(
-    'schtasks',
-    ['/Create', '/TN', 'Autopilot', '/TR', tr, '/SC', 'ONLOGON', '/RL', 'LIMITED', '/F'],
-    { windowsHide: true, encoding: 'utf8' }
-  );
+  // Write or remove the unit/plist first, so the loader has something to act on.
+  try {
+    if (plan.write) {
+      fs.mkdirSync(path.dirname(plan.write), { recursive: true });
+      fs.writeFileSync(plan.write, plan.content, 'utf8');
+    }
+  } catch (err) {
+    console.error(`autopilot boot ${onOff}: could not write ${plan.write}: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const r = spawnSync(plan.bin, plan.args, { windowsHide: true, encoding: 'utf8' });
+
+  // Removal happens after the unloader has run, so it is not yanked mid-command.
+  if (plan.remove) {
+    try { fs.unlinkSync(plan.remove); } catch (err) { /* already gone */ }
+  }
+
   if (r.status === 0) {
-    console.log('autopilot boot on: scheduled task registered (runs at logon)');
+    console.log(onOff === 'on'
+      ? 'autopilot boot on: registered to run at login'
+      : 'autopilot boot off: login entry removed');
   } else {
-    console.error(`autopilot boot on: schtasks failed: ${(r.stderr || r.stdout || '').trim()}`);
+    const detail = (r.stderr || r.stdout || r.error?.message || '').trim();
+    console.error(`autopilot boot ${onOff}: ${plan.bin} failed: ${detail}`);
     process.exitCode = 1;
   }
 }
@@ -575,4 +659,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, getPort };
+module.exports = { parseArgs, getPort, buildBootPlan };

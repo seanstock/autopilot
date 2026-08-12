@@ -1,10 +1,14 @@
 'use strict';
 
-// Notifier: OS toast (Windows) + optional webhook. Best-effort, fire-and-
-// forget: notify() never throws and never blocks the caller beyond
+// Notifier: OS toast (Windows, macOS, Linux) + optional webhook. Best-effort,
+// fire-and-forget: notify() never throws and never blocks the caller beyond
 // spawning a child process / issuing a request. All failures are swallowed
 // -- it is fine if a toast silently fails in CI or headless environments.
 // Zero npm dependencies, Node built-ins only, CommonJS.
+//
+// Command construction is deliberately split out into a pure function
+// (buildToastCommand) so all three platforms can be unit-tested from any one
+// of them. Only the spawn is platform-dependent at runtime.
 
 const { spawn } = require('child_process');
 const http = require('http');
@@ -34,15 +38,45 @@ function buildToastScript(title, body) {
   ].join('; ');
 }
 
-function sendToast(title, body) {
-  if (process.platform !== 'win32') return;
+// Escape for embedding inside an AppleScript double-quoted string.
+function asEscape(str) {
+  return String(str).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+// Pure: platform -> {bin, args} for a desktop notification, or null when this
+// platform has no toast mechanism we can rely on. Never spawns anything, so
+// every branch is testable from any host OS.
+//
+//   win32  - WinRT toast via PowerShell (as before)
+//   darwin - osascript, present on every macOS install, no dependency
+//   linux  - notify-send (libnotify); absent on some minimal systems, which is
+//            fine because a failed spawn is swallowed and the webhook still
+//            fires. Preferred over gdbus/zenity as the most widely present.
+function buildToastCommand(platform, title, body) {
+  if (platform === 'win32') {
+    return { bin: 'powershell', args: ['-NoProfile', '-Command', buildToastScript(title, body)] };
+  }
+  if (platform === 'darwin') {
+    const script = `display notification "${asEscape(body)}" with title "${asEscape(title)}"`;
+    return { bin: 'osascript', args: ['-e', script] };
+  }
+  if (platform === 'linux') {
+    // Args are passed as an array, never through a shell, so no quoting needed.
+    return { bin: 'notify-send', args: ['--app-name=Autopilot', String(title), String(body)] };
+  }
+  return null;
+}
+
+function sendToast(title, body, platform) {
+  const cmd = buildToastCommand(platform || process.platform, title, body);
+  if (!cmd) return;
   try {
-    const script = buildToastScript(title, body);
-    const child = spawn('powershell', ['-NoProfile', '-Command', script], {
+    const child = spawn(cmd.bin, cmd.args, {
       windowsHide: true,
       stdio: 'ignore',
     });
-    // Swallow everything: a failed toast is not a failed notify().
+    // Swallow everything: a failed toast is not a failed notify(). On Linux
+    // this is also how a missing notify-send is absorbed.
     child.on('error', () => {});
     child.unref();
   } catch (err) {
@@ -102,4 +136,4 @@ function notify(title, body, settings) {
   }
 }
 
-module.exports = { notify };
+module.exports = { notify, buildToastCommand };
