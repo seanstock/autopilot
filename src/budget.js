@@ -190,10 +190,12 @@ class BudgetManager {
     // over (observed: five_hour back to 1% at 17:05, latch held until 22:00).
     this.forcedRecheckMs = opts.forcedRecheckMs != null ? opts.forcedRecheckMs : 5 * 60 * 1000;
     this._forcedCheckedAt = 0; // ms epoch of the last forced-latch verification
-    // Codex has no meter: a usage-limit exit sleeps that engine for this
-    // long, then the next cycle is the re-check (see noteUsageLimitExit).
-    this.codexRetryMs = opts.codexRetryMs != null ? opts.codexRetryMs : 60 * 60 * 1000;
-    this._codexLatchUntil = 0;
+    // Non-Anthropic engines have no meter: a usage-limit exit sleeps that
+    // engine for this long, then the next cycle is the re-check (see
+    // noteUsageLimitExit). codexRetryMs is the pre-openrouter name.
+    this.engineRetryMs = opts.engineRetryMs != null ? opts.engineRetryMs
+      : opts.codexRetryMs != null ? opts.codexRetryMs : 60 * 60 * 1000;
+    this._engineLatchUntil = {}; // engine -> ms epoch
   }
 
   overCeiling(windows) {
@@ -226,14 +228,15 @@ class BudgetManager {
   // 60s-gated poll to (eventually) learn the same thing.
   //
   // engine (2026-09-15): 'claude' (default) latches the Anthropic meter as
-  // before. 'codex' has no meter at all - there is no endpoint that reports
-  // a ChatGPT plan's utilization - so a Codex usage-limit exit is the ONLY
-  // signal, and it latches a fixed re-try window (codexRetryMs). When it
-  // lapses the next Codex cycle is the re-check: it either works or exits
-  // usage_limit again within a minute or two, which costs almost nothing.
+  // before. Every other engine has no meter at all - nothing reports a
+  // ChatGPT plan's utilization or an OpenRouter balance the way the
+  // Anthropic endpoint does - so a usage-limit exit is the ONLY signal, and
+  // it latches that engine for a fixed re-try window (engineRetryMs). When
+  // it lapses the next cycle on that engine is the re-check: it either
+  // works or exits usage_limit again within a minute or two, cheaply.
   noteUsageLimitExit(engine) {
-    if (engine === 'codex') {
-      this._codexLatchUntil = Date.now() + this.codexRetryMs;
+    if (engine && engine !== 'claude') {
+      this._engineLatchUntil[engine] = Date.now() + this.engineRetryMs;
       return;
     }
     const fallback = this._lastResult && this._lastResult.resetsAt;
@@ -245,11 +248,11 @@ class BudgetManager {
 
   // Synchronous gate for engines that have no meter. Returns the same shape
   // as check() minus windows: {ok, reason, resetsAt}. Claude callers should
-  // keep using check(); this exists so the scheduler can ask "may a codex
-  // cycle launch" without touching the Anthropic meter at all.
+  // keep using check(); this exists so the scheduler can ask "may a codex /
+  // openrouter cycle launch" without touching the Anthropic meter at all.
   engineOk(engine) {
-    if (engine !== 'codex') return { ok: true, reason: null, resetsAt: null };
-    const until = this._codexLatchUntil || 0;
+    if (!engine || engine === 'claude') return { ok: true, reason: null, resetsAt: null };
+    const until = this._engineLatchUntil[engine] || 0;
     if (until > Date.now()) {
       return { ok: false, reason: 'ceiling', resetsAt: new Date(until).toISOString() };
     }

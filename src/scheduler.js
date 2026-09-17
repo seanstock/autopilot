@@ -525,7 +525,8 @@ class Scheduler extends EventEmitter {
       }
     }
 
-    const gates = { claude: claudeOk, codex: this._engineGate('codex').ok };
+    const gates = { claude: claudeOk };
+    for (const id of enginesModule.ENGINE_IDS) if (id !== 'claude') gates[id] = this._engineGate(id).ok;
 
     // 4/5. Fill free cycle slots. Launches are NOT awaited: each cycle
     // chain tracks itself in _running/_cyclePromises and the tick returns
@@ -749,7 +750,7 @@ class Scheduler extends EventEmitter {
     try {
       providerKeys = keysModule.load();
     } catch (err) {
-      providerKeys = { openai: null, stability: null, sources: {} };
+      providerKeys = { openrouter: null, openai: null, sources: {} };
     }
     let codexLoggedIn = null;
     try {
@@ -771,7 +772,6 @@ class Scheduler extends EventEmitter {
         notes: this.stateObj.settings.notes || '',
         providerKeys,
         codexLoggedIn,
-        defaultImageModel: this.stateObj.settings.imageModel || null,
       });
     } catch (err) {
       // runCycle's contract is "never rejects"; guard anyway so a broken
@@ -929,13 +929,14 @@ class Scheduler extends EventEmitter {
     } else if (this.paused) {
       status = 'sleeping';
       statusDetail = 'paused';
-    } else if (enginesModule.normalizeEngine(project.engine) === 'codex') {
-      // Codex projects never wait on the Anthropic meter; only on their
-      // own usage-limit latch.
-      const gate = this._engineGate('codex');
+    } else if (enginesModule.normalizeEngine(project.engine) !== 'claude') {
+      // Codex / OpenRouter projects never wait on the Anthropic meter; only
+      // on their own engine's usage-limit latch.
+      const eng = enginesModule.normalizeEngine(project.engine);
+      const gate = this._engineGate(eng);
       if (!gate.ok) {
         status = 'sleeping';
-        statusDetail = `codex usage limit, retry ${gate.resetsAt || 'soon'}`;
+        statusDetail = `${eng} usage limit, retry ${gate.resetsAt || 'soon'}`;
       } else {
         status = 'queued';
         statusDetail = 'queued';
@@ -1052,7 +1053,6 @@ class Scheduler extends EventEmitter {
         notes: this.stateObj.settings.notes || '',
         concurrency: this._concurrency(),
         projectsRoot: this.stateObj.settings.projectsRoot || null,
-        imageModel: this.stateObj.settings.imageModel || null,
       },
       // `current` is kept for UI/API compat: the oldest in-flight cycle, or
       // null. `running` is the full slot list (concurrency-aware).
@@ -1129,11 +1129,11 @@ class Scheduler extends EventEmitter {
     try {
       return keysModule.summary(keysModule.load());
     } catch (err) {
-      return keysModule.summary({ openai: null, stability: null, sources: {} });
+      return keysModule.summary({ openrouter: null, openai: null, sources: {} });
     }
   }
 
-  // patch: {openai?: string, stability?: string}; '' clears. Returns the
+  // patch: {openrouter?: string, openai?: string}; '' clears. Returns the
   // masked summary. The key itself never enters the snapshot or a log.
   setProviderKeys(patch) {
     const rec = keysModule.load();
@@ -1332,13 +1332,6 @@ class Scheduler extends EventEmitter {
       const n = Number(clean.concurrency);
       if (!Number.isInteger(n) || n < 1 || n > 8) delete clean.concurrency;
       else clean.concurrency = n;
-    }
-    // imageModel: a safe-charset model id, or null/'' to clear.
-    if (Object.prototype.hasOwnProperty.call(clean, 'imageModel')) {
-      const v = clean.imageModel;
-      if (v === null || v === '') clean.imageModel = null;
-      else if (typeof v === 'string' && /^[a-z0-9][a-z0-9.\-]{0,63}$/i.test(v.trim())) clean.imageModel = v.trim();
-      else delete clean.imageModel;
     }
     // projectsRoot: an existing absolute directory, or null/'' to clear.
     if (Object.prototype.hasOwnProperty.call(clean, 'projectsRoot')) {

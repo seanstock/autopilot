@@ -276,22 +276,29 @@ launch each CLI's own browser sign-in from the daemon's desktop session.
 Autopilot reads nothing from either account beyond the Anthropic usage meter
 it already read.
 
-**Provider keys and images (2026-09-16).** `src/keys.js` stores an OpenAI
-and a Stability AI key in `~/.autopilot/keys.json` (separate from the
-registry; 0600 on POSIX; masked everywhere the UI or API can see). They are
-the one deliberate exception to the strip-every-key rule: the runner strips
-all ambient provider keys, then injects the stored ones, because storing a
-key on the Settings page is an explicit decision to let cycles spend it.
-Anthropic keys are never injected. `CODEX_API_KEY` is set only when the
-Codex CLI reports not signed in, so a subscription is never silently
-replaced by API billing. Keys are auto-detected (env, then `.env` files up
-to two levels under home) into EMPTY slots at daemon start and on demand.
-`image.js` at the repo root is the cycle-callable image helper (OpenAI
-Images and Stability Stable Image v2beta); it is a separate file because the
-guard blocks Bash commands that mention `autopilot.js`. The preamble gains
-an "Image generation" section only when a key is stored. The model catalog
-(`engines.MODEL_CATALOG`) ships in the snapshot, and `engineForModel`
-moves a project between engines when its model id changes.
+**Provider keys and the openrouter engine (2026-09-16).** `src/keys.js`
+stores an OpenRouter and an OpenAI key in `~/.autopilot/keys.json` (separate
+from the registry; 0600 on POSIX; masked everywhere the UI or API can see).
+They are the one deliberate exception to the strip-every-key rule: the
+runner strips all ambient provider keys, then injects the stored ones,
+because storing a key on the Settings page is an explicit decision to let
+cycles spend it. Anthropic keys are never injected. `CODEX_API_KEY` is set
+only when the Codex CLI reports not signed in, so a subscription is never
+silently replaced by API billing. Keys are auto-detected (env, then `.env`
+files up to two levels under home) into EMPTY slots at daemon start and on
+demand. The `openrouter` engine is Claude Code with `ANTHROPIC_BASE_URL`
+pointed at OpenRouter and the key as `ANTHROPIC_AUTH_TOKEN` (OpenRouter's
+documented setup), with every Claude Code model alias env var pinned to
+the project's model; it keeps the guard hook, deny rules and stream-json
+parsing, and is gated by its own usage-limit latch like codex. The credit
+tripwire (section 3) is scanned for claude cycles only, so a third-party
+"insufficient credits" can never latch the daemon-wide FATAL. The model
+catalog (`engines.MODEL_CATALOG`) ships in the snapshot; its OpenRouter
+group is sean.wiki/chat's picker minus Anthropic and OpenAI, and
+`THIRD_PARTY_VENDOR_RE` refuses those ids at validation (user rule:
+Anthropic and OpenAI models run on their own engines, never via a third
+party). `engineForModel` moves a project between engines when its model
+id changes.
 
 ## 5. Containment profile ("standard")
 

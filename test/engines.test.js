@@ -168,15 +168,15 @@ test('EngineStatus caches, refreshes when stale, and reports unchecked before th
   assert.equal(first.codex.installed, null, 'unchecked until the probe lands');
   assert.equal(first.codex.detail, 'checking...');
   await es.refresh();
-  assert.equal(probes, 2, 'one probe per engine');
+  assert.equal(probes, 3, 'one probe per engine');
   assert.equal(es.current().claude.loggedIn, true);
   assert.equal(es.current().codex.loggedIn, false);
   es.current();
-  assert.equal(probes, 2, 'fresh: no re-probe');
+  assert.equal(probes, 3, 'fresh: no re-probe');
   now += 600;
   es.current();
   await new Promise((r) => setTimeout(r, 5));
-  assert.equal(probes, 4, 'stale: background re-probe kicked off');
+  assert.equal(probes, 6, 'stale: background re-probe kicked off');
 });
 
 test('EngineStatus.login spawns the engine login and forces a re-probe; refuses when not installed', async () => {
@@ -189,4 +189,73 @@ test('EngineStatus.login spawns the engine login and forces a re-probe; refuses 
   assert.deepEqual(es.login('codex'), { ok: false, error: 'codex is not installed on this machine' });
   assert.equal(es.login('claude').ok, true);
   assert.deepEqual(spawned, ['claude']);
+});
+
+// ---- openrouter engine (2026-09-16) ---------------------------------------------
+
+test('openrouter runs on the claude CLI with claude argv; codex stays codex', () => {
+  assert.deepEqual(engines.command('openrouter', 'win32'), ['cmd', '/c', 'claude']);
+  assert.deepEqual(engines.command('openrouter', 'linux'), ['claude']);
+  assert.equal(engines.runsOnClaudeCode('openrouter'), true);
+  assert.equal(engines.runsOnClaudeCode('codex'), false);
+  const a = engines.cycleArgs({ engine: 'openrouter', model: 'google/gemini-3.7-flash', effort: 'high', settingsPath: '/s.json', dir: '/p' });
+  assert.deepEqual(a.slice(0, 5), ['-p', '--model', 'google/gemini-3.7-flash', '--effort', 'high']);
+  assert.ok(a.includes('stream-json'));
+  assert.deepEqual(engines.parseLine('openrouter', { type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }] } }).texts, ['hi']);
+});
+
+test('engineForModel: claude-* -> claude, gpt-* -> codex, vendor/model -> openrouter, other -> null', () => {
+  assert.equal(engines.engineForModel('claude-opus-5'), 'claude');
+  assert.equal(engines.engineForModel('gpt-5.6-sol'), 'codex');
+  assert.equal(engines.engineForModel('qwen/qwen3-coder-plus'), 'openrouter');
+  assert.equal(engines.engineForModel('deepseek/deepseek-v4-flash:free'), 'openrouter');
+  assert.equal(engines.engineForModel('muse-glimmer'), null);
+  assert.equal(engines.engineForModel(undefined), null);
+});
+
+test('the catalog offers no Anthropic or OpenAI model through OpenRouter', () => {
+  for (const id of engines.MODEL_CATALOG.text.openrouter) {
+    assert.ok(id.includes('/'), id);
+    assert.doesNotMatch(id, engines.THIRD_PARTY_VENDOR_RE, id);
+  }
+  assert.ok(engines.MODEL_CATALOG.text.openrouter.includes('google/gemini-3.7-flash'));
+  assert.ok(engines.MODEL_CATALOG.text.openrouter.includes('deepseek/deepseek-v4-pro'));
+  assert.equal(engines.MODEL_CATALOG.images, undefined, 'image models are gone');
+});
+
+test('probeEngine(openrouter): installed follows claude, signed-in follows the stored key', async () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-engines-home-'));
+  process.env.AUTOPILOT_HOME_OVERRIDE = home;
+  try {
+    const run = fakeRun({ 'claude --version': { stdout: '2.1.270 (Claude Code)\n' }, 'claude auth status': { code: 0, stdout: '{"loggedIn":false}' } });
+    const none = await engines.probeEngine('openrouter', run);
+    assert.equal(none.installed, true);
+    assert.equal(none.loggedIn, false);
+    assert.match(none.detail, /no OpenRouter key/);
+    const keys = require('../src/keys');
+    const rec = keys.load();
+    keys.set(rec, 'openrouter', 'sk-or-test', 'settings');
+    keys.save(rec);
+    const withKey = await engines.probeEngine('openrouter', run);
+    assert.equal(withKey.loggedIn, true);
+    assert.equal(withKey.detail, 'key set');
+    const noClaude = await engines.probeEngine('openrouter', fakeRun({}));
+    assert.equal(noClaude.installed, false);
+    assert.equal(noClaude.loggedIn, false);
+  } finally {
+    delete process.env.AUTOPILOT_HOME_OVERRIDE;
+  }
+});
+
+test('EngineStatus.login(openrouter) points at the key field instead of spawning anything', async () => {
+  let spawned = 0;
+  const es = new engines.EngineStatus({ probeImpl: async (id) => ({ id, installed: true, loggedIn: false }), loginSpawnImpl: () => { spawned += 1; } });
+  await es.refresh();
+  const r = es.login('openrouter');
+  assert.equal(r.ok, false);
+  assert.match(r.error, /API key/);
+  assert.equal(spawned, 0);
 });

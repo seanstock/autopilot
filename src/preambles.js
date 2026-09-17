@@ -280,30 +280,6 @@ be done in a couple of minutes.
 // see docs/plans/2026-07-24-goal-loop.md), so "complex" here means update
 // the spec AND emit orders for worker cycles to pick up, not do the work
 // directly in this cycle.
-// Appended to work and orchestrate preambles only when a provider key is
-// stored (runner decides). Tells the cycle the helper exists and how to call
-// it; the helper reads the keys itself, so the command line never carries
-// a secret and never mentions the Autopilot home directory (which the guard
-// hook blocks).
-function imageToolSection(tool) {
-  const script = String(tool.scriptPath).replace(/\\/g, '/');
-  const model = tool.model ? `The configured image model is \`${tool.model}\`; omit --model to use it.` : 'Omit --model to use the default for the available provider.';
-  const providers = (tool.providers || []).map((p) => (p === 'openai' ? 'OpenAI (gpt-image-*)' : 'Stability AI (stable-image-*, sd3.5-*)')).join(' and ');
-  return `
-## Image generation
-
-You can generate images when the mission calls for them (site art, textures,
-concept renders, placeholders that should not stay placeholders):
-
-    node "${script}" "<prompt>" --out <path.png> [--model <id>] [--aspect 16:9]
-
-${model} Available providers: ${providers}. The helper prints the written
-path; treat a nonzero exit as "no image this cycle" and move on rather than
-retrying in a loop - every call costs real money. Keep prompts specific and
-commit the resulting files like any other artifact.
-`;
-}
-
 function injectionSection(text, orchestrated) {
   const complexClause = orchestrated
     ? `   - COMPLEX (multiple tasks, or it changes scope, requirements, or
@@ -545,7 +521,6 @@ module.exports = {
   criticPreamble,
   wrapupPreamble,
   injectionSection,
-  imageToolSection,
   orchestratorPreamble,
   workerOrderSection,
 };

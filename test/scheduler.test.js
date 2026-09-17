@@ -1010,7 +1010,7 @@ test('snapshot matches the shared status contract shape', async () => {
   // 'notes' is the shared "things to know" prepended to every project's
   // mission. It rides in settings so the UI can edit it in one place.
   assert.deepEqual(Object.keys(snap.settings).sort(),
-    ['ceilingPct', 'graceMinutes', 'webhook', 'notes', 'concurrency', 'projectsRoot', 'imageModel'].sort());
+    ['ceilingPct', 'graceMinutes', 'webhook', 'notes', 'concurrency', 'projectsRoot'].sort());
 
   const p = snap.projects[0];
   for (const key of ['status', 'statusDetail', 'cycle', 'sinceReview', 'lastExit', 'lastCommit', 'lastVerify', 'pendingInject', 'totals', 'orders']) {
@@ -1473,23 +1473,19 @@ test('setProviderKeys / detectProviderKeys persist to keys.json and surface mask
   assert.doesNotMatch(JSON.stringify(sched.snapshot()), /1234567890/, 'the key never enters the snapshot');
   sched.setProviderKeys({ openai: '' });
   assert.equal(sched.snapshot().keys.openai.set, false);
-  assert.equal(sched.updateSettings({ imageModel: 'gpt-image-2.5-flare' }).imageModel, 'gpt-image-2.5-flare');
-  assert.equal(sched.updateSettings({ imageModel: 'bad model!' }).imageModel, 'gpt-image-2.5-flare');
-  assert.equal(sched.updateSettings({ imageModel: '' }).imageModel, null);
 });
 
-test('runCycleImpl receives providerKeys, codexLoggedIn and defaultImageModel', async () => {
+test('runCycleImpl receives providerKeys and codexLoggedIn', async () => {
   const project = makeProject();
-  const stateObj = makeStateObj([project], { imageModel: 'stable-image-core' });
+  const stateObj = makeStateObj([project]);
   const fakeEngines = { current: () => ({ claude: { loggedIn: true }, codex: { loggedIn: false } }), refresh: async () => ({}), login: () => ({ ok: true }) };
   let received = null;
   const sched = new Scheduler({ stateObj, budget: makeBudget(), notifyImpl: () => {}, tickMs: 15, engines: fakeEngines,
     runCycleImpl: async (opts) => { received = opts; return cleanResult(); } });
-  sched.setProviderKeys({ stability: 'sk-stab' });
+  sched.setProviderKeys({ openrouter: 'sk-or' });
   sched.start();
   await waitUntil(() => received !== null);
   await sched.stopDaemon();
-  assert.equal(received.providerKeys.stability, 'sk-stab');
+  assert.equal(received.providerKeys.openrouter, 'sk-or');
   assert.equal(received.codexLoggedIn, false);
-  assert.equal(received.defaultImageModel, 'stable-image-core');
 });

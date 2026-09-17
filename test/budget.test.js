@@ -746,7 +746,7 @@ test('probeGate spawns the CLI through the platform wrapper, not a bare name', a
 // is the re-check. The Anthropic meter must be untouched by it either way.
 
 test('noteUsageLimitExit("codex") latches only the codex gate, for codexRetryMs', async () => {
-  const mgr = new BudgetManager({ settings: { ceilingPct: 75 }, codexRetryMs: 50 });
+  const mgr = new BudgetManager({ settings: { ceilingPct: 75 }, engineRetryMs: 50 });
   assert.equal(mgr.engineOk('codex').ok, true);
   assert.equal(mgr.engineOk('claude').ok, true, 'claude never uses engineOk gating');
 
@@ -757,8 +757,12 @@ test('noteUsageLimitExit("codex") latches only the codex gate, for codexRetryMs'
   assert.ok(gate.resetsAt);
   assert.equal(mgr._forcedUntilResetsAt, null, 'the Anthropic forced latch is not set by a codex exit');
 
+  assert.equal(mgr.engineOk('openrouter').ok, true, 'each engine has its own latch');
+  mgr.noteUsageLimitExit('openrouter');
+  assert.equal(mgr.engineOk('openrouter').ok, false);
   await new Promise((r) => setTimeout(r, 70));
   assert.equal(mgr.engineOk('codex').ok, true, 'latch lapses on its own');
+  assert.equal(mgr.engineOk('openrouter').ok, true);
 });
 
 test('noteUsageLimitExit() with no engine keeps the original claude behaviour', () => {

@@ -62,10 +62,10 @@ function gitInit(dir) {
 // deliberately ordinary, boring projects. Validation of each value happens
 // in state.addProject via the same EDITABLE_KEYS path the add-project form
 // uses; invalid values are dropped there, never stored.
-// engine + imageModel (2026-09-16): a variant may run on the other engine
-// (Claude vs Codex head-to-head) or a different image model; the engine is
-// also inferred from the model id in state.addProject when not given.
-const OVERRIDE_KEYS = ['engine', 'model', 'workerModel', 'effort', 'workerEffort', 'verifyCmd', 'imageModel'];
+// engine (2026-09-16): a variant may run on another engine (Claude vs
+// Codex vs an OpenRouter model head-to-head); the engine is also inferred
+// from the model id in state.addProject when not given.
+const OVERRIDE_KEYS = ['engine', 'model', 'workerModel', 'effort', 'workerEffort', 'verifyCmd'];
 
 // Create an experiment: dirs + git init + register one ordinary project per
 // variant. All-or-nothing: any failure rolls back projects already

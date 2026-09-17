@@ -28,7 +28,10 @@ const engines = require('./engines');
 // strings change between CLI versions, so these are best-effort text
 // classification, checked in a fixed order against the full captured
 // stdout+stderr text).
-const USAGE_LIMIT_RE = /usage limit|rate limit|hit your limit|out of extended usage/i;
+// "insufficient credits" / 402 cover OpenRouter (and any API-billed engine)
+// running dry: the same treatment as a subscription window closing - sleep
+// that engine, do not crash-loop it.
+const USAGE_LIMIT_RE = /usage limit|rate limit|hit your limit|out of extended usage|insufficient credits|payment required|\b402\b/i;
 const CONTEXT_FULL_RE = /context window|prompt is too long|context low|ran out of context/i;
 
 // A cycle that errors out this fast with no structured result line reads as
@@ -202,19 +205,15 @@ function safeEnsureContainment(project) {
   }
 }
 
-function buildPreamble(project, kind, order, notes, imageTool) {
+function buildPreamble(project, kind, order, notes) {
   try {
     if (kind === 'critic') return preambles.criticPreamble(project, notes);
     if (kind === 'wrapup') return preambles.wrapupPreamble(project);
-    if (kind === 'orchestrate') {
-      const base = preambles.orchestratorPreamble(project, notes);
-      return imageTool ? `${base}\n${preambles.imageToolSection(imageTool)}` : base;
-    }
+    if (kind === 'orchestrate') return preambles.orchestratorPreamble(project, notes);
     let base = preambles.workPreamble(project, notes);
     if (order) {
       base = `${base}\n${preambles.workerOrderSection(order)}`;
     }
-    if (imageTool) base = `${base}\n${preambles.imageToolSection(imageTool)}`;
     return base;
   } catch (err) {
     util.log('runner: preamble build failed', String(err && err.message));
@@ -369,18 +368,7 @@ async function runCycle(opts) {
       ? orchestrateSettingsPath || settingsPath
       : settingsPath;
   const preHead = gitRevParseHead(dir);
-  // Image generation is offered to the cycle only when a provider key is
-  // stored; otherwise the section is omitted and the model never hears of
-  // a tool it could not use.
-  const pk = opts.providerKeys || {};
-  const imageTool = (pk.openai || pk.stability)
-    ? {
-      scriptPath: path.join(containment.INSTALL_DIR, 'image.js'),
-      model: project.imageModel || opts.defaultImageModel || null,
-      providers: [pk.openai ? 'openai' : null, pk.stability ? 'stability' : null].filter(Boolean),
-    }
-    : null;
-  let preamble = buildPreamble(project, kind, order, opts.notes, imageTool);
+  let preamble = buildPreamble(project, kind, order, opts.notes);
   const injection = consumeInjection(project, kind, cycleNumber, order);
   if (injection) {
     preamble = `${preamble}\n${preambles.injectionSection(injection, !!project.workerModel)}`;
@@ -408,9 +396,10 @@ async function runCycle(opts) {
   // the Settings page are injected back (see engines.cycleEnv). The
   // scheduler passes providerKeys + codexLoggedIn; tests may omit both.
   const keysModule = require('./keys');
-  const providerKeys = opts.providerKeys || { openai: null, stability: null, sources: {} };
+  const providerKeys = opts.providerKeys || { openrouter: null, openai: null, sources: {} };
   const env = engines.cycleEnv(process.env, keysModule.cycleEnvVars(providerKeys, {
     engine,
+    model: project.model,
     codexLoggedIn: opts.codexLoggedIn,
   }));
 
@@ -546,8 +535,11 @@ async function runCycle(opts) {
 
   const minutes = (Date.now() - startedAt) / 60000;
 
+  // The credit-balance tripwire is about Anthropic credits (SPEC section 3):
+  // only a claude-engine cycle can trip it. An OpenRouter or Codex error
+  // that happens to mention a balance must not latch the daemon-wide FATAL.
   try {
-    if (budget && typeof budget.scanForTripwire === 'function') {
+    if (engine === 'claude' && budget && typeof budget.scanForTripwire === 'function') {
       budget.scanForTripwire(rawOutput);
     }
   } catch (err) {

@@ -457,7 +457,7 @@ function startServer({ scheduler, port }) {
       return sendJson(res, 200, scheduler.snapshot());
     }
     // ---- provider keys (settings page) --------------------------------------
-    // GET returns masked summaries only. POST {openai?, stability?} sets or
+    // GET returns masked summaries only. POST {openrouter?, openai?} sets or
     // clears ('' clears). POST /detect fills empty slots from the daemon's
     // environment and nearby .env files. Keys live in ~/.autopilot/keys.json,
     // never in the snapshot, the registry or a log line.
@@ -476,7 +476,7 @@ function startServer({ scheduler, port }) {
       return sendJson(res, 200, scheduler.detectProviderKeys());
     }
 
-    let en = pathname.match(/^\/api\/engines\/(claude|codex)\/login$/);
+    let en = pathname.match(/^\/api\/engines\/(claude|codex|openrouter)\/login$/);
     if (en && method === 'POST') {
       const r = typeof scheduler.startEngineLogin === 'function'
         ? scheduler.startEngineLogin(en[1])

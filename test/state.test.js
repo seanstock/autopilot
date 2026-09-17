@@ -382,6 +382,9 @@ test('engine follows the model when not given explicitly; an explicit engine win
   assert.equal(claude.engine, 'claude');
   const local = state.addProject(s, { dir: tempProjectDir(), model: 'muse-glimmer' });
   assert.equal(local.engine, 'claude', 'an unknown id has no opinion; default stays');
+  const or = state.addProject(s, { dir: tempProjectDir(), model: 'qwen/qwen3-coder-plus' });
+  assert.equal(or.engine, 'openrouter');
+  assert.equal(or.model, 'qwen/qwen3-coder-plus');
   const explicit = state.addProject(s, { dir: tempProjectDir(), model: 'gpt-5.6-sol', engine: 'claude' });
   assert.equal(explicit.engine, 'claude');
 
@@ -391,14 +394,18 @@ test('engine follows the model when not given explicitly; an explicit engine win
   assert.equal(state.getProject(s, claude.id).engine, 'claude');
 });
 
-test('imageModel is an optional safe-charset field, clearable on update', () => {
+test('Anthropic and OpenAI ids via OpenRouter are refused; other vendor/model ids and :variants are fine', () => {
   tempHome();
   const s = { settings: {}, projects: [] };
-  const p = state.addProject(s, { dir: tempProjectDir(), imageModel: 'sd3.5-large' });
-  assert.equal(p.imageModel, 'sd3.5-large');
-  state.updateProject(s, p.id, { imageModel: '<script>' });
-  assert.equal(state.getProject(s, p.id).imageModel, 'sd3.5-large', 'junk dropped');
-  state.updateProject(s, p.id, { imageModel: '' });
-  assert.equal(state.getProject(s, p.id).imageModel, undefined);
-  assert.equal(state.load().settings.imageModel, null);
+  const p = state.addProject(s, { dir: tempProjectDir(), model: 'anthropic/claude-opus-5' });
+  assert.equal(p.model, 'claude-sonnet-5', 'third-party Anthropic id dropped, default kept');
+  assert.equal(p.engine, 'claude');
+  state.updateProject(s, p.id, { model: 'openai/gpt-5.6-terra-pro' });
+  assert.equal(state.getProject(s, p.id).model, 'claude-sonnet-5');
+  state.updateProject(s, p.id, { model: 'deepseek/deepseek-v4-flash:free' });
+  assert.equal(state.getProject(s, p.id).model, 'deepseek/deepseek-v4-flash:free');
+  assert.equal(state.getProject(s, p.id).engine, 'openrouter');
+  state.updateProject(s, p.id, { workerModel: 'anthropic/claude-haiku-4.5' });
+  assert.equal(state.getProject(s, p.id).workerModel, undefined);
 });
+

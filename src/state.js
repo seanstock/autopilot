@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 const util = require('./util');
-const { engineForModel } = require('./engines');
+const { engineForModel, THIRD_PARTY_VENDOR_RE } = require('./engines');
 
 const PROJECTS_FILENAME = 'projects.json';
 const FATAL_FILENAME = 'fatal.json';
@@ -26,9 +26,6 @@ const DEFAULT_SETTINGS = {
   // Where the UI's directory browser starts when adding a project, and the
   // suggested parent for new ones. null = the user's home directory.
   projectsRoot: null,
-  // Default model for image.js when a project sets none. null = first
-  // provider with a stored key.
-  imageModel: null,
 };
 
 const PROJECT_DEFAULTS = {
@@ -208,7 +205,6 @@ const EDITABLE_KEYS = [
   'reviewGateCycles',
   'containment',
   'verifyCmd',
-  'imageModel',
   'enabled',
   // Experiments (2026-08-07 spec): hard cycle cap; the scheduler disables
   // the project when runtime.cycle reaches it. 0/absent = uncapped.
@@ -223,7 +219,10 @@ const EFFORT_LEVELS = util.EFFORT_LEVELS;
 // A model id is a safe-charset token. Validating it (rather than storing
 // the request body verbatim) closes the same stored-XSS hole the I6 fix
 // closed for the numeric fields: model renders straight into the UI DOM.
-const MODEL_RE = /^[a-z0-9][a-z0-9.\-]{0,63}$/i;
+// '/' and ':' admit OpenRouter ids (vendor/model, optional :variant).
+// Anthropic and OpenAI ids via OpenRouter are refused outright (user rule:
+// those vendors run on their own engines, never through a third party).
+const MODEL_RE = /^[a-z0-9][a-z0-9.\-/:]{0,79}$/i;
 
 // Validate-and-assign a single field onto a project object. Invalid values
 // are dropped, never stored (stored-XSS defense: every one of these renders
@@ -253,10 +252,10 @@ function applyProjectField(target, key, value, allowClear) {
     if (value === 'claude' || value === 'codex') target[key] = value;
     return;
   }
-  if (key === 'model' || key === 'workerModel' || key === 'imageModel') {
-    if (typeof value === 'string' && MODEL_RE.test(value.trim())) {
+  if (key === 'model' || key === 'workerModel') {
+    if (typeof value === 'string' && MODEL_RE.test(value.trim()) && !THIRD_PARTY_VENDOR_RE.test(value.trim())) {
       target[key] = value.trim();
-    } else if (allowClear && isClear && key !== 'model') {
+    } else if (allowClear && isClear && key === 'workerModel') {
       delete target[key];
     }
     return;

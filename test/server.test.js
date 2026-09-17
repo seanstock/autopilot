@@ -628,16 +628,16 @@ test('engines endpoints: GET status, POST refresh, POST login (409 on refusal)',
     const no = await requestRaw(port, 'POST', '/api/engines/codex/login', { host: `127.0.0.1:${port}`, body: {} });
     assert.equal(no.status, 409);
     assert.match(no.body.error, /not installed/);
-    const unknown = await requestRaw(port, 'POST', '/api/engines/gemini/login', { host: `127.0.0.1:${port}`, body: {} });
+    const unknown = await requestRaw(port, 'POST', '/api/engines/stability/login', { host: `127.0.0.1:${port}`, body: {} });
     assert.equal(unknown.status, 404);
   });
 });
 
 test('keys endpoints: GET is masked, POST sets/clears, POST /detect fills', async () => {
   const sched = makeFakeScheduler([]);
-  sched._snapshot.keys = { openai: { set: true, masked: 'sk-pr...abc', source: 'settings' }, stability: { set: false, masked: null, source: null } };
+  sched._snapshot.keys = { openai: { set: true, masked: 'sk-pr...abc', source: 'settings' }, openrouter: { set: false, masked: null, source: null } };
   const setCalls = [];
-  sched.setProviderKeys = (patch) => { setCalls.push(patch); return { openai: { set: false, masked: null, source: null }, stability: { set: true, masked: 'sk-st...xyz', source: 'settings' } }; };
+  sched.setProviderKeys = (patch) => { setCalls.push(patch); return { openai: { set: false, masked: null, source: null }, openrouter: { set: true, masked: 'sk-or...xyz', source: 'settings' } }; };
   sched.detectProviderKeys = () => ({ filled: ['openai'], keys: sched._snapshot.keys });
   await withServer(sched, async (port) => {
     const g = await requestRaw(port, 'GET', '/api/keys', { host: `127.0.0.1:${port}` });
@@ -645,10 +645,10 @@ test('keys endpoints: GET is masked, POST sets/clears, POST /detect fills', asyn
     assert.equal(g.body.keys.openai.masked, 'sk-pr...abc');
     assert.doesNotMatch(g.raw, /sk-proj/);
 
-    const p = await requestRaw(port, 'POST', '/api/keys', { host: `127.0.0.1:${port}`, body: { openai: '', stability: 'sk-stab-full' } });
+    const p = await requestRaw(port, 'POST', '/api/keys', { host: `127.0.0.1:${port}`, body: { openai: '', openrouter: 'sk-or-full' } });
     assert.equal(p.status, 200);
-    assert.deepEqual(setCalls, [{ openai: '', stability: 'sk-stab-full' }]);
-    assert.equal(p.body.keys.stability.set, true);
+    assert.deepEqual(setCalls, [{ openai: '', openrouter: 'sk-or-full' }]);
+    assert.equal(p.body.keys.openrouter.set, true);
 
     const d = await requestRaw(port, 'POST', '/api/keys/detect', { host: `127.0.0.1:${port}`, body: {} });
     assert.equal(d.status, 200);

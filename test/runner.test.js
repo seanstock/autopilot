@@ -702,7 +702,7 @@ test('codex engine: a usage-limit exit is classified and latches the codex engin
 test('stored provider keys are injected into the cycle env; CODEX_API_KEY only when codex is signed out', async () => {
   const dir = tempProjectRepo();
   const project = baseProject(dir, { engine: 'codex', model: 'default' });
-  const providerKeys = { openai: 'sk-stored-openai', stability: 'sk-stored-stab', sources: {} };
+  const providerKeys = { openai: 'sk-stored-openai', openrouter: 'sk-stored-or', sources: {} };
   process.env.OPENAI_API_KEY = 'ambient-should-not-leak';
   let seen;
   try {
@@ -725,22 +725,22 @@ test('stored provider keys are injected into the cycle env; CODEX_API_KEY only w
   assert.equal(seen2.CODEX_API_KEY, null, 'signed-in codex keeps subscription billing');
 });
 
-test('the image-generation section reaches the preamble only when a provider key is stored', async () => {
+test('openrouter engine: claude argv, base URL + bearer token injected, no Anthropic key, no tripwire scan', async () => {
   const dir = tempProjectRepo();
-  await withFakeMode('clean', () =>
-    runCycle({ project: baseProject(dir, { imageModel: 'sd3.5-medium' }), kind: 'work', cycleNumber: 1, budget: mockBudget(), claudeCmd: fakeCmd(),
-      providerKeys: { openai: null, stability: 'sk-s', sources: {} } })
+  const project = baseProject(dir, { engine: 'openrouter', model: 'qwen/qwen3-coder-plus' });
+  const providerKeys = { openai: null, openrouter: 'sk-or-stored', sources: {} };
+  const budget = mockBudget();
+  const result = await withFakeMode('credit', () =>
+    runCycle({ project, kind: 'work', cycleNumber: 1, budget, claudeCmd: fakeCmd(), providerKeys })
   );
-  const prompt = fs.readFileSync(path.join(dir, 'received_prompt.txt'), 'utf8');
-  assert.match(prompt, /## Image generation/);
-  assert.match(prompt, /image\.js/);
-  assert.match(prompt, /sd3\.5-medium/);
-  assert.match(prompt, /Stability AI/);
-  assert.doesNotMatch(prompt, /sk-s\b/, 'the key never enters the prompt');
-
-  const dir2 = tempProjectRepo();
-  await withFakeMode('clean', () =>
-    runCycle({ project: baseProject(dir2), kind: 'work', cycleNumber: 1, budget: mockBudget(), claudeCmd: fakeCmd() })
-  );
-  assert.doesNotMatch(fs.readFileSync(path.join(dir2, 'received_prompt.txt'), 'utf8'), /## Image generation/);
+  const seen = JSON.parse(fs.readFileSync(path.join(dir, 'env_seen.json'), 'utf8'));
+  const argv = seen.argv.join(' ');
+  assert.match(argv, /^-p --model qwen\/qwen3-coder-plus /, 'claude argv with the OpenRouter id');
+  assert.match(argv, /stream-json/);
+  assert.equal(seen.ANTHROPIC_BASE_URL, 'https://openrouter.ai/api');
+  assert.equal(seen.ANTHROPIC_API_KEY, null);
+  assert.equal(seen.ANTHROPIC_AUTH_TOKEN, 'sk-or-stored');
+  assert.equal(budget.calls.scanForTripwire.length, 0, 'the Anthropic credit tripwire is not scanned for a non-claude engine');
+  assert.notEqual(result.exit, 'clean');
 });
+

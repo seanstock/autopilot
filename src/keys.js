@@ -1,6 +1,6 @@
 'use strict';
 
-// Provider API keys (2026-09-16): OpenAI and Stability AI.
+// Provider API keys (2026-09-16): OpenRouter and OpenAI.
 // Zero npm dependencies, Node built-ins only, CommonJS.
 //
 // Stored in ~/.autopilot/keys.json, deliberately SEPARATE from projects.json
@@ -9,14 +9,16 @@
 // directory to the user).
 //
 // What the keys are for:
-//   - injected into every cycle's environment (OPENAI_API_KEY,
-//     STABILITY_API_KEY) so a project's own code and the image helper
-//     (image.js) can call those APIs;
-//   - a Codex cycle also gets CODEX_API_KEY from the OpenAI key when the
-//     Codex CLI is NOT signed in to a ChatGPT account, so API billing is a
-//     fallback, never a silent replacement for a subscription.
-// Autopilot itself never sends a key anywhere except to those providers on
-// the user's behalf through image.js.
+//   - openrouter: what the openrouter engine runs on. A cycle on that engine
+//     gets ANTHROPIC_BASE_URL pointed at OpenRouter and the key as
+//     ANTHROPIC_AUTH_TOKEN (OpenRouter's documented Claude Code setup), plus
+//     the model-alias env vars pinned to the project's model so nothing
+//     inside Claude Code falls back to an Anthropic id the router would
+//     bill separately.
+//   - openai: Codex's API-billed fallback (CODEX_API_KEY) when the Codex CLI
+//     is NOT signed in to a ChatGPT account - never a silent replacement for
+//     a subscription. Also passed as OPENAI_API_KEY for a project's own code.
+// Autopilot itself never sends a key anywhere.
 //
 // Detection: the daemon fills EMPTY slots once at startup, and the Settings
 // page has a "Detect" button, from (in order) the daemon's own environment
@@ -29,13 +31,14 @@ const path = require('path');
 
 const util = require('./util');
 
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api';
 const KEYS_FILENAME = 'keys.json';
-const PROVIDERS = ['openai', 'stability'];
+const PROVIDERS = ['openrouter', 'openai'];
 
 // env var names recognised per provider, in priority order.
 const ENV_NAMES = {
+  openrouter: ['OPENROUTER_API_KEY', 'OPENROUTER_KEY'],
   openai: ['OPENAI_API_KEY'],
-  stability: ['STABILITY_API_KEY', 'STABILITY_KEY', 'STABILITYAI_API_KEY'],
 };
 
 function keysFile() {
@@ -43,7 +46,7 @@ function keysFile() {
 }
 
 function emptyRecord() {
-  return { openai: null, stability: null, sources: {} };
+  return { openrouter: null, openai: null, sources: {} };
 }
 
 function load() {
@@ -59,7 +62,7 @@ function load() {
 
 function save(rec) {
   const file = keysFile();
-  util.writeJson(file, { openai: rec.openai || null, stability: rec.stability || null, sources: rec.sources || {} });
+  util.writeJson(file, { openrouter: rec.openrouter || null, openai: rec.openai || null, sources: rec.sources || {} });
   if (process.platform !== 'win32') {
     try { fs.chmodSync(file, 0o600); } catch (err) { /* best effort */ }
   }
@@ -98,8 +101,13 @@ function summary(rec) {
 }
 
 // The env vars a cycle should receive. Returns a plain object to merge onto
-// the (already stripped) cycle env. codexLoggedIn: when false and an OpenAI
-// key exists, Codex gets it as CODEX_API_KEY (API-billed fallback).
+// the (already stripped) cycle env.
+//   engine 'openrouter' + model: Claude Code is pointed at OpenRouter and
+//     every model alias Claude Code might resolve on its own (subagents,
+//     the small/fast model, /model defaults) is pinned to the project's
+//     model, so the whole cycle runs on the model the user picked.
+//   engine 'codex' + codexLoggedIn false: the OpenAI key doubles as
+//     CODEX_API_KEY (API-billed fallback).
 function cycleEnvVars(rec, opts) {
   const o = opts || {};
   const vars = {};
@@ -107,7 +115,14 @@ function cycleEnvVars(rec, opts) {
     vars.OPENAI_API_KEY = rec.openai;
     if (o.engine === 'codex' && o.codexLoggedIn === false) vars.CODEX_API_KEY = rec.openai;
   }
-  if (rec.stability) vars.STABILITY_API_KEY = rec.stability;
+  if (rec.openrouter && o.engine === 'openrouter') {
+    vars.ANTHROPIC_BASE_URL = OPENROUTER_BASE_URL;
+    vars.ANTHROPIC_AUTH_TOKEN = rec.openrouter;
+    if (o.model) {
+      for (const alias of ['FABLE', 'OPUS', 'SONNET', 'HAIKU']) vars[`ANTHROPIC_DEFAULT_${alias}_MODEL`] = o.model;
+      vars.CLAUDE_CODE_SUBAGENT_MODEL = o.model;
+    }
+  }
   return vars;
 }
 
@@ -163,7 +178,7 @@ function dotenvCandidates(homeDir) {
 function detect(opts) {
   const o = opts || {};
   const env = o.env || process.env;
-  const found = { openai: null, stability: null };
+  const found = { openrouter: null, openai: null };
   for (const p of PROVIDERS) {
     for (const name of ENV_NAMES[p]) {
       if (typeof env[name] === 'string' && env[name].trim()) {
@@ -172,7 +187,7 @@ function detect(opts) {
       }
     }
   }
-  if (found.openai && found.stability) return found;
+  if (PROVIDERS.every((p) => found[p])) return found;
   const files = o.files || dotenvCandidates(o.homeDir);
   for (const f of files) {
     let parsed;
@@ -190,7 +205,7 @@ function detect(opts) {
         }
       }
     }
-    if (found.openai && found.stability) break;
+    if (PROVIDERS.every((p) => found[p])) break;
   }
   return found;
 }

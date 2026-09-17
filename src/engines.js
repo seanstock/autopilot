@@ -3,10 +3,17 @@
 // Engines: the headless coding CLIs Autopilot can run a cycle through.
 // Zero npm dependencies, Node built-ins only, CommonJS.
 //
-//   claude - Claude Code, `claude -p --output-format stream-json`, billed to
-//            an Anthropic subscription. The original and default engine.
-//   codex  - OpenAI Codex CLI, `codex exec --json`, billed to a ChatGPT
-//            subscription. Added 2026-09-15.
+//   claude     - Claude Code, `claude -p --output-format stream-json`, billed
+//                to an Anthropic subscription. The original and default engine.
+//   codex      - OpenAI Codex CLI, `codex exec --json`, billed to a ChatGPT
+//                subscription. Added 2026-09-15.
+//   openrouter - Claude Code again, pointed at OpenRouter's Anthropic-
+//                compatible endpoint (ANTHROPIC_BASE_URL + bearer key), so
+//                any OpenRouter model id (google/, x-ai/, qwen/, deepseek/,
+//                ...) runs a cycle with the same hooks, guard and parsing as
+//                the claude engine. Billed to OpenRouter credits. Added
+//                2026-09-16. Anthropic and OpenAI models are deliberately
+//                NOT offered through it: those run on their own engines.
 //
 // Everything engine-specific that the runner needs is a pure function here
 // (command, args, env, line parsing) so both engines are unit-testable from
@@ -30,8 +37,16 @@ const { spawn, execFile } = require('child_process');
 
 const util = require('./util');
 
-const ENGINE_IDS = ['claude', 'codex'];
+const ENGINE_IDS = ['claude', 'codex', 'openrouter'];
 const DEFAULT_ENGINE = 'claude';
+
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api';
+
+// Engines that Claude Code executes (same CLI, same argv, same guard hook).
+function runsOnClaudeCode(engine) {
+  const e = normalizeEngine(engine);
+  return e === 'claude' || e === 'openrouter';
+}
 
 // Codex's `model_reasoning_effort` accepts minimal|low|medium|high|xhigh.
 // Autopilot's effort set is claude's (low..max); `max` has no Codex
@@ -49,35 +64,55 @@ function normalizeEngine(value) {
 
 // The model catalog the UI offers (2026-09-16). One source of truth, shipped
 // in the status snapshot so every dropdown (add form, config card,
-// experiment defaults and variants) draws from the same list. Ids verified
-// against each vendor's model page on 2026-09-16; anything not listed can
-// still be typed in as a custom id. `text` models run cycles; `images`
-// models are for image.js and never run a cycle.
+// experiment defaults and variants) draws from the same list. Anything not
+// listed can still be typed in as a custom id.
+//   anthropic  - claude engine (subscription); ids verified 2026-09-16
+//   openai     - codex engine (subscription); ids verified 2026-09-16
+//   openrouter - openrouter engine; the curated picker from sean.wiki/chat
+//                minus its Anthropic and OpenAI entries (those belong on
+//                their own engines, never via a third party - user rule).
 const MODEL_CATALOG = {
   text: {
     anthropic: ['claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5'],
     openai: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
-  },
-  images: {
-    openai: ['gpt-image-2.5-sunburst', 'gpt-image-2.5-flare'],
-    stability: ['stable-image-ultra', 'stable-image-core', 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium'],
+    openrouter: [
+      'google/gemini-3.7-flash',
+      'x-ai/grok-4.6',
+      'moonshotai/kimi-k3',
+      'moonshotai/kimi-k2.7-code',
+      'qwen/qwen3.8-max',
+      'qwen/qwen3.8-2.4t-a95b',
+      'qwen/qwen3.8-27b',
+      'qwen/qwen3.8-flash',
+      'qwen/qwen3-coder-plus',
+      'z-ai/glm-5.3',
+      'z-ai/glm-5.3-flash',
+      'deepseek/deepseek-v4-pro',
+      'deepseek/deepseek-v4-flash',
+    ],
   },
 };
 
-// Which engine a text model id implies: claude-* runs on Claude Code, an
-// OpenAI id on Codex, and anything else (a local model, a custom id) keeps
-// whatever engine the project already has (null = no opinion).
+// OpenRouter ids for Anthropic and OpenAI models are refused everywhere a
+// model is set (state validation): those vendors run on their own engines.
+const THIRD_PARTY_VENDOR_RE = /^(anthropic|openai)\//i;
+
+// Which engine a model id implies: claude-* runs on Claude Code, an OpenAI
+// id on Codex, a vendor/model id on OpenRouter, and anything else (a local
+// model, a custom id) keeps whatever engine the project already has
+// (null = no opinion).
 function engineForModel(model) {
   if (typeof model !== 'string') return null;
   if (/^claude-/i.test(model)) return 'claude';
   if (/^(gpt-|o\d|codex)/i.test(model)) return 'codex';
+  if (model.includes('/')) return 'openrouter';
   return null;
 }
 
 // Command + leading args for the engine's CLI. On Windows an npm-installed
 // CLI is a .cmd shim that Node's spawn() cannot run without a shell.
 function command(engine, platform) {
-  const bin = normalizeEngine(engine);
+  const bin = runsOnClaudeCode(engine) ? 'claude' : 'codex';
   return (platform || process.platform) === 'win32' ? ['cmd', '/c', bin] : [bin];
 }
 
@@ -118,11 +153,14 @@ function cycleArgs({ engine, model, effort, settingsPath, dir, containment }) {
 //
 // The exception is deliberate: keys the user stored on the Settings page
 // (src/keys.js) are injected back AFTER the strip, because storing one there
-// is an explicit decision to let cycles use it - for a project's own code,
-// for image.js, and as Codex's API-billed fallback when it has no ChatGPT
-// login. Anthropic keys are never injected: Claude cycles stay on the
-// subscription, always.
-const STRIPPED_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'STABILITY_API_KEY', 'STABILITY_KEY'];
+// is an explicit decision to let cycles use it - the OpenRouter key is what
+// the openrouter engine runs on, and the OpenAI key is Codex's API-billed
+// fallback when it has no ChatGPT login. Anthropic keys are never injected:
+// Claude cycles stay on the subscription, always.
+// ANTHROPIC_BASE_URL is NOT stripped: an ambient endpoint (a gateway, Claude
+// Desktop's own setting) passes through to claude cycles unchanged, as it
+// always has; only the openrouter engine overrides it, explicitly.
+const STRIPPED_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENROUTER_API_KEY'];
 
 function cycleEnv(baseEnv, injected) {
   const env = Object.assign({}, baseEnv || process.env);
@@ -210,6 +248,12 @@ function normalizeModelUsage(raw) {
 const PROBE_TTL_MS = 60 * 1000;
 const PROBE_TIMEOUT_MS = 15 * 1000;
 
+const ENGINE_LABELS = {
+  claude: 'Claude Code (Anthropic)',
+  codex: 'Codex CLI (OpenAI)',
+  openrouter: 'OpenRouter (via Claude Code)',
+};
+
 function runCapture(cmd, args, timeoutMs) {
   return new Promise((resolve) => {
     let settled = false;
@@ -232,7 +276,26 @@ async function probeEngine(engine, runImpl) {
   const run = runImpl || runCapture;
   const id = normalizeEngine(engine);
   const cmd = command(id);
-  const base = { id, label: id === 'codex' ? 'Codex CLI (OpenAI)' : 'Claude Code (Anthropic)' };
+  const base = { id, label: ENGINE_LABELS[id] };
+
+  // OpenRouter is not a CLI: it is Claude Code plus a stored key. "Signed
+  // in" means the key exists (src/keys.js); "installed" means claude is.
+  if (id === 'openrouter') {
+    const claudeStatus = await probeEngine('claude', runImpl);
+    let keySet = false;
+    try {
+      keySet = !!require('./keys').load().openrouter;
+    } catch (err) {
+      keySet = false;
+    }
+    return Object.assign(base, {
+      installed: claudeStatus.installed,
+      version: claudeStatus.version,
+      loggedIn: claudeStatus.installed && keySet,
+      detail: !claudeStatus.installed ? 'needs Claude Code on PATH' : keySet ? 'key set' : 'no OpenRouter key (Settings > Provider API keys)',
+      checkedIso: util.nowIso(),
+    });
+  }
 
   const v = await run(cmd[0], cmd.slice(1).concat(['--version']), PROBE_TIMEOUT_MS);
   if (v.error === 'ENOENT' || (v.code !== 0 && !v.stdout.trim())) {
@@ -327,7 +390,7 @@ class EngineStatus {
     if (this._now() - this._checkedAt >= this._ttlMs) this.refresh();
     const out = {};
     for (const id of ENGINE_IDS) {
-      out[id] = this._state[id] || { id, label: id === 'codex' ? 'Codex CLI (OpenAI)' : 'Claude Code (Anthropic)',
+      out[id] = this._state[id] || { id, label: ENGINE_LABELS[id],
         installed: null, version: null, loggedIn: null, detail: 'checking...', checkedIso: null };
     }
     return out;
@@ -357,6 +420,7 @@ class EngineStatus {
   // the login shows up on the next probe; callers force one with refresh().
   login(engine) {
     const id = normalizeEngine(engine);
+    if (id === 'openrouter') return { ok: false, error: 'OpenRouter has no sign-in: paste its API key under Provider API keys' };
     const st = this._state[id];
     if (st && st.installed === false) return { ok: false, error: `${id} is not installed on this machine` };
     try {
@@ -382,7 +446,11 @@ module.exports = {
   CODEX_EFFORT,
   STRIPPED_ENV,
   MODEL_CATALOG,
+  THIRD_PARTY_VENDOR_RE,
+  OPENROUTER_BASE_URL,
+  ENGINE_LABELS,
   engineForModel,
+  runsOnClaudeCode,
   normalizeEngine,
   command,
   cycleArgs,

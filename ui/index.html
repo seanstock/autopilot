@@ -367,8 +367,9 @@
         <select id="f-engine" onchange="syncAddFormModels()">
           <option value="claude" selected>Claude Code (Anthropic subscription)</option>
           <option value="codex">Codex CLI (ChatGPT subscription)</option>
+          <option value="openrouter">OpenRouter (any vendor, API credits, via Claude Code)</option>
         </select>
-        <div class="contain-warn" id="codexNote" style="display:none">Codex cycles have no guard hook: STOP is enforced by the daemon's kill poll only, and edits are confined by Codex's own workspace sandbox. There is no usage meter for a ChatGPT plan; a Codex project runs until a cycle hits the limit, then sleeps an hour.</div>
+        <div class="contain-warn" id="engineNote" style="display:none"></div>
       </div>
       <div class="frow"><label>Mission prompt</label>
         <textarea id="f-prompt" placeholder="What should cycles work toward? This is the Prime Directive text every cycle reads." required></textarea>
@@ -383,7 +384,6 @@
         <div class="frow"><label>Critic ratio</label><input type="number" id="f-critic" value="5" min="0" title="every Nth cycle is a critic; 0 = off"></div>
         <div class="frow"><label>Review gate</label><input type="number" id="f-gate" value="0" min="0" title="pause for review after N cycles; 0 = off"></div>
         <div class="frow"><label>Containment</label><select id="f-contain" onchange="document.getElementById('cwarn').style.display=this.value==='off'?'block':'none'"><option>standard</option><option>off</option></select></div>
-        <div class="frow"><label>Image model</label><select id="f-image" onchange="customModelHook(this)"><option value="">default (Settings)</option></select></div>
       </div>
       <div class="contain-warn" id="cwarn">Containment off: no guard hook, no deny rules. API key stripping still applies.</div>
       <div class="m-actions"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="submit" class="primary">Add &amp; start</button></div>
@@ -399,7 +399,6 @@
       <div class="frow"><label>Label</label><input type="text" id="av-label" placeholder="e.g. new-model"></div>
       <div class="frow"><label>Model</label><select id="av-model" onchange="customModelHook(this)"></select></div>
       <div class="frow"><label>Worker model</label><select id="av-worker" onchange="customModelHook(this)"></select></div>
-      <div class="frow"><label>Image model</label><select id="av-image" onchange="customModelHook(this)"></select></div>
       <div class="frow"><label>Effort</label>
         <select id="av-effort"><option value="">inherit</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select>
       </div>
@@ -425,20 +424,11 @@
 
     <div class="settings-section">
       <h4>Provider API keys</h4>
-      <p class="hint">For API-billed models. Stored in <code>~/.autopilot/keys.json</code> on this machine only, never in the registry, a log, or the UI. Cycles receive them as <code>OPENAI_API_KEY</code> / <code>STABILITY_API_KEY</code> so a project's own code and the image helper can use them. A signed-in Codex keeps using its subscription; the OpenAI key is its fallback when it is not signed in. Claude cycles always stay on the subscription. Detect looks in this machine's environment and nearby <code>.env</code> files and fills empty slots.</p>
+      <p class="hint">Stored in <code>~/.autopilot/keys.json</code> on this machine only, never in the registry, a log, or the UI. <b>OpenRouter</b> is what the OpenRouter engine runs on (Gemini, Grok, Qwen, DeepSeek, Kimi, GLM...). <b>OpenAI</b> is Codex's fallback when it is not signed in to ChatGPT, and reaches a project's own code as <code>OPENAI_API_KEY</code>. Claude cycles always stay on the Anthropic subscription. Detect looks in this machine's environment and nearby <code>.env</code> files and fills empty slots.</p>
       <div id="keyRows"></div>
       <div style="margin-top:8px; display:flex; gap:8px; align-items:center">
         <button onclick="detectKeys()">Detect on this machine</button>
         <span id="keyHint" style="font-size:12px; color:var(--text-secondary)"></span>
-      </div>
-    </div>
-
-    <div class="settings-section">
-      <h4>Image generation</h4>
-      <p class="hint">Default model for the image helper (<code>node image.js "prompt" --out file.png</code>), used by any project that does not pick its own. Cycles only hear about the helper when a key above is set.</p>
-      <div style="display:flex; gap:8px">
-        <select id="s-image" onchange="customModelHook(this)" style="flex:1"></select>
-        <button type="button" class="primary" onclick="saveImageModel()">Save</button>
       </div>
     </div>
 
@@ -501,13 +491,12 @@
           <select id="ex-def-effort"><option value="">default</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select>
         </div>
         <div class="frow"><label>Default verify command</label><input type="text" id="ex-def-verify" placeholder="optional"></div>
-        <div class="frow"><label>Default image model</label><select id="ex-def-image" onchange="customModelHook(this)"></select></div>
         <div class="frow"><label>Port base</label><input type="number" id="ex-portbase" min="1024" max="64000" placeholder="empty = static site" onchange="onExpPortBaseChange()" title="Server experiment: variant i gets port base+i as a local Docker container. Check the port range is free first."></div>
       </div>
       <div class="frow">
         <label>Variants</label>
         <table id="ex-variants-table">
-          <tr><th>label</th><th>model</th><th>worker model</th><th>image model</th><th>effort</th><th>prompt suffix</th><th></th></tr>
+          <tr><th>label</th><th>model</th><th>worker model</th><th>effort</th><th>prompt suffix</th><th></th></tr>
           <tbody id="ex-variants-body"></tbody>
         </table>
         <div style="margin-top:8px"><button type="button" onclick="addExpVariantRow()">+ Add variant</button></div>
@@ -1178,8 +1167,7 @@ function renderTailLine(raw) {
 // (src/engines.js MODEL_CATALOG), so every dropdown reads one list.
 const MODEL_OPTS = ['claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5'];
 const FALLBACK_CATALOG = {
-  text: { anthropic: MODEL_OPTS, openai: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] },
-  images: { openai: ['gpt-image-2.5-sunburst', 'gpt-image-2.5-flare'], stability: ['stable-image-ultra', 'stable-image-core', 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium'] },
+  text: { anthropic: MODEL_OPTS, openai: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'], openrouter: ['google/gemini-3.7-flash', 'x-ai/grok-4.6', 'qwen/qwen3-coder-plus', 'deepseek/deepseek-v4-pro'] },
 };
 const CUSTOM_MODEL = '__custom__';
 const EFFORT_OPTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -1197,20 +1185,28 @@ function modelOptsFor(engine) {
     .concat(c.anthropic.map(v => ({ value: v, label: v, group: 'Anthropic (Claude Code)' })))
     .concat(c.openai.map(v => ({ value: v, label: v, group: 'OpenAI (Codex)' })))
     .concat([{ value: 'default', label: 'default (Codex config)', group: 'OpenAI (Codex)' }])
+    .concat((c.openrouter || []).map(v => ({ value: v, label: v, group: 'OpenRouter (other vendors)' })))
     .concat([{ value: CUSTOM_MODEL, label: 'custom model id...' }]);
 }
 
-function imageModelOpts() {
-  const c = catalog().images;
-  return c.openai.map(v => ({ value: v, label: v, group: 'OpenAI' }))
-    .concat(c.stability.map(v => ({ value: v, label: v, group: 'Stability AI' })))
-    .concat([{ value: CUSTOM_MODEL, label: 'custom model id...' }]);
-}
-
+// Mirrors src/engines.js engineForModel. Anthropic/OpenAI ids via OpenRouter
+// are refused server-side; the custom prompt below says so up front.
 function engineForModelUI(model) {
   if (/^claude-/i.test(model)) return 'claude';
   if (/^(gpt-|o\d|codex)/i.test(model) || model === 'default') return 'codex';
+  if (model.includes('/')) return 'openrouter';
   return null;
+}
+
+const ENGINE_NOTES = {
+  codex: 'Codex cycles have no guard hook: STOP is enforced by the daemon\'s kill poll only, and edits are confined by Codex\'s own workspace sandbox. There is no usage meter for a ChatGPT plan; a Codex project runs until a cycle hits the limit, then sleeps an hour.',
+  openrouter: 'OpenRouter cycles run Claude Code pointed at OpenRouter, billed to your OpenRouter credits (key in Settings). Any vendor/model id works except Anthropic and OpenAI ones, which run on their own engines. Claude Code is tuned for Claude; other vendors may be less reliable with its tools. No meter: a cycle that runs out of credits sleeps the engine for an hour.',
+};
+function showEngineNote(engine) {
+  const el = document.getElementById('engineNote');
+  if (!el) return;
+  el.textContent = ENGINE_NOTES[engine] || '';
+  el.style.display = ENGINE_NOTES[engine] ? 'block' : 'none';
 }
 
 // After a model pick: resolve "custom", then move the engine select (if the
@@ -1221,7 +1217,7 @@ function onModelPick(sel, engineSelId) {
   const engineSel = engineSelId && document.getElementById(engineSelId);
   if (eng && engineSel && engineSel.value !== eng) {
     engineSel.value = eng;
-    if (engineSelId === 'f-engine') document.getElementById('codexNote').style.display = eng === 'codex' ? 'block' : 'none';
+    if (engineSelId === 'f-engine') showEngineNote(eng);
   }
 }
 
@@ -1229,9 +1225,9 @@ function onModelPick(sel, engineSelId) {
 // as a real option, so the rest of the form never sees the sentinel.
 function customModelHook(sel) {
   if (sel.value !== CUSTOM_MODEL) return;
-  const id = (prompt('Model id (letters, digits, dots and dashes):') || '').trim();
+  const id = (prompt('Model id: claude-*, gpt-*, or an OpenRouter vendor/model id (not anthropic/ or openai/):') || '').trim();
   const prev = sel.dataset.prev || '';
-  if (!id || !/^[a-z0-9][a-z0-9.\-]{0,63}$/i.test(id)) { sel.value = prev; return; }
+  if (!id || !/^[a-z0-9][a-z0-9.\-/:]{0,79}$/i.test(id) || /^(anthropic|openai)\//i.test(id)) { sel.value = prev; return; }
   const opt = document.createElement('option');
   opt.value = id; opt.textContent = id;
   sel.insertBefore(opt, sel.firstChild);
@@ -1251,12 +1247,10 @@ function syncAddFormModels() {
   const modelSel = document.getElementById('f-model');
   const cur = modelSel.value;
   const keep = cur && engineForModelUI(cur) === engine;
-  fillModelSelect(modelSel, engine, keep ? cur : (engine === 'codex' ? 'default' : 'claude-sonnet-5'), null);
+  fillModelSelect(modelSel, engine, keep ? cur : defaultModelFor(engine), null);
   const workerSel = document.getElementById('f-worker');
   fillModelSelect(workerSel, engine, workerSel.value || '', 'none (not orchestrated)');
-  const imgSel = document.getElementById('f-image');
-  imgSel.innerHTML = optionList(imageModelOpts(), imgSel.value || '', 'default (Settings)');
-  document.getElementById('codexNote').style.display = engine === 'codex' ? 'block' : 'none';
+  showEngineNote(engine);
 }
 
 // Config card: same, for an existing project.
@@ -1266,7 +1260,13 @@ function syncConfigModels() {
   const modelSel = document.getElementById('cfg-model');
   const cur = modelSel.value || (p && p.model) || '';
   const keep = cur && engineForModelUI(cur) === engine;
-  fillModelSelect(modelSel, engine, keep ? cur : (engine === 'codex' ? 'default' : 'claude-sonnet-5'), null);
+  fillModelSelect(modelSel, engine, keep ? cur : defaultModelFor(engine), null);
+}
+
+function defaultModelFor(engine) {
+  if (engine === 'codex') return 'default';
+  if (engine === 'openrouter') return (catalog().text.openrouter || [])[0] || '';
+  return 'claude-sonnet-5';
 }
 
 // Accepts plain strings, or {value,label} when the option needs to display
@@ -1317,11 +1317,10 @@ function renderConfigCard(p) {
     <div class="card">
       <h3>Config <span class="sub">applies on the next cycle</span></h3>
       <div class="cfg-grid">
-        <label>Engine<select id="cfg-engine" onchange="syncConfigModels()">${optionList([{ value: 'claude', label: 'Claude Code' }, { value: 'codex', label: 'Codex CLI' }], p.engine || 'claude', null)}</select></label>
+        <label>Engine<select id="cfg-engine" onchange="syncConfigModels()">${optionList([{ value: 'claude', label: 'Claude Code' }, { value: 'codex', label: 'Codex CLI' }, { value: 'openrouter', label: 'OpenRouter' }], p.engine || 'claude', null)}</select></label>
         <label>Model (orchestrator)<select id="cfg-model" onchange="onModelPick(this, 'cfg-engine')">${optionList(modelOptsFor(p.engine || 'claude'), p.model, null)}</select></label>
         <label>Effort<select id="cfg-effort">${optionList(EFFORT_OPTS, p.effort || '', 'default')}</select></label>
         <label>Worker model<select id="cfg-worker" onchange="customModelHook(this)">${optionList(modelOptsFor(p.engine || 'claude'), p.workerModel || '', 'none (not orchestrated)')}</select></label>
-        <label>Image model<select id="cfg-image" onchange="customModelHook(this)">${optionList(imageModelOpts(), p.imageModel || '', 'default (Settings)')}</select></label>
         <label>Worker effort<select id="cfg-worker-effort">${optionList(EFFORT_OPTS, p.workerEffort || '', 'inherit')}</select></label>
         <label>Critic ratio<input type="number" id="cfg-critic" min="0" value="${safeNum(p.criticRatio, 0)}"></label>
         <label>Review gate<input type="number" id="cfg-gate" min="0" value="${safeNum(p.reviewGateCycles, 0)}"></label>
@@ -1342,7 +1341,6 @@ async function saveConfig() {
     effort: g('cfg-effort').value,          // '' => revert to CLI default
     workerModel: g('cfg-worker').value,      // '' => turn orchestration off
     workerEffort: g('cfg-worker-effort').value, // '' => inherit orchestrator effort
-    imageModel: g('cfg-image').value,          // '' => the Settings default
     criticRatio: Number(g('cfg-critic').value),
     reviewGateCycles: Number(g('cfg-gate').value),
   };
@@ -1404,7 +1402,6 @@ function renderDetailShell(loading, errorMsg) {
         ${(p.engine || 'claude') !== 'claude' ? `<span class="tag">${escapeHtml(p.engine)}</span>` : ''}
         <span class="tag">${escapeHtml(p.model)}${p.effort ? ' &middot; ' + escapeHtml(p.effort) : ''}</span>
         ${p.workerModel ? `<span class="tag">worker: ${escapeHtml(p.workerModel)}${p.workerEffort ? ' &middot; ' + escapeHtml(p.workerEffort) : ''}</span>` : ''}
-        ${p.imageModel ? `<span class="tag">images: ${escapeHtml(p.imageModel)}</span>` : ''}
         <span class="tag">critic 1:${safeNum(p.criticRatio, 0) || 'off'}</span>
         <span class="tag">gate ${safeNum(p.reviewGateCycles, 0) || 'off'}</span>
         <span class="tag" ${p.containment === 'off' ? 'style="color:var(--accent);border-color:rgba(224,53,53,.35)"' : ''}>containment ${escapeHtml(p.containment)}</span>
@@ -1567,8 +1564,7 @@ async function submitAdd(ev) {
     maxCycleMinutes: +document.getElementById('f-maxCycle').value || 120,
     criticRatio: +document.getElementById('f-critic').value || 0,
     reviewGateCycles: +document.getElementById('f-gate').value || 0,
-    containment: document.getElementById('f-contain').value,
-    imageModel: document.getElementById('f-image').value
+    containment: document.getElementById('f-contain').value
   };
   if (!body.dir || !body.prompt) { alert('Directory and mission prompt are required.'); return; }
   try {
@@ -1858,7 +1854,6 @@ function openSettings() {
   const s = status && status.settings;
   document.getElementById('s-root').value = (s && s.projectsRoot) || '';
   document.getElementById('s-webhook').value = (s && s.webhook) || '';
-  document.getElementById('s-image').innerHTML = optionList(imageModelOpts(), (s && s.imageModel) || '', 'auto (first provider with a key)');
   const port = location.port || '4680';
   document.getElementById('s-port').textContent = port;
   renderSettings();
@@ -1870,8 +1865,8 @@ function closeSettings() {
 }
 
 const KEY_PROVIDERS = [
+  { id: 'openrouter', label: 'OpenRouter', hint: 'openrouter.ai/keys' },
   { id: 'openai', label: 'OpenAI', hint: 'platform.openai.com/api-keys' },
-  { id: 'stability', label: 'Stability AI', hint: 'platform.stability.ai/account/keys' },
 ];
 
 function renderKeyRows() {
@@ -1943,21 +1938,23 @@ async function detectKeys() {
   }
 }
 
-async function saveImageModel() {
-  const v = document.getElementById('s-image').value;
-  await doAction('/api/settings', { imageModel: v || '' });
-}
-
 function renderSettings() {
   renderKeyRows();
   const rows = document.getElementById('engineRows');
   const engines = (status && status.engines) || {};
-  const order = ['claude', 'codex'];
+  const order = ['claude', 'codex', 'openrouter'];
   rows.innerHTML = order.map(id => {
     const e = engines[id] || { id, label: id, installed: null, loggedIn: null, detail: 'checking...' };
     const label = e.label || id;
     const cls = e.installed === null ? 'off' : !e.installed ? 'off' : e.loggedIn ? '' : 'warn';
     const installCmd = id === 'codex' ? 'npm i -g @openai/codex' : 'npm i -g @anthropic-ai/claude-code';
+    if (id === 'openrouter') {
+      return `<div class="engine-row">
+        <span class="dot ${e.loggedIn ? '' : e.installed === false ? 'off' : 'warn'}"></span>
+        <span class="e-name">${escapeHtml(label)}</span>
+        <span class="e-detail">${escapeHtml(e.installed === null ? 'checking...' : (e.detail || ''))}</span>
+      </div>`;
+    }
     const detail = e.installed === false ? `not installed · ${installCmd}`
       : e.installed === null ? 'checking...'
       : `${e.version ? 'v' + e.version + ' · ' : ''}${e.detail || ''}`;
@@ -2022,7 +2019,6 @@ function openAddVariantModal(expId) {
   document.getElementById('avForm').reset();
   fillModelSelect(document.getElementById('av-model'), 'claude', '', 'inherit experiment default');
   fillModelSelect(document.getElementById('av-worker'), 'claude', '', 'inherit');
-  document.getElementById('av-image').innerHTML = optionList(imageModelOpts(), '', 'inherit');
   document.getElementById('av-exp').textContent = expId;
   const err = document.getElementById('avError');
   err.style.display = 'none';
@@ -2042,11 +2038,9 @@ async function submitAddVariant(ev) {
   const overrides = {};
   const model = document.getElementById('av-model').value.trim();
   const worker = document.getElementById('av-worker').value.trim();
-  const imageModel = document.getElementById('av-image').value.trim();
   const effort = document.getElementById('av-effort').value;
   if (model) overrides.model = model;
   if (worker) overrides.workerModel = worker;
-  if (imageModel) overrides.imageModel = imageModel;
   if (effort) overrides.effort = effort;
   const body = { overrides };
   const label = document.getElementById('av-label').value.trim();
@@ -2089,7 +2083,6 @@ function addExpVariantRow(data) {
     <td><input type="text" class="exv-label" value="${escapeHtml(d.label || '')}" placeholder="variant-${expVariantSeq}"></td>
     <td><select class="exv-model" onchange="customModelHook(this)">${optionList(modelOptsFor('claude'), d.model || '', 'inherit')}</select></td>
     <td><select class="exv-worker" onchange="customModelHook(this)">${optionList(modelOptsFor('claude'), d.workerModel || '', 'inherit')}</select></td>
-    <td><select class="exv-image" onchange="customModelHook(this)">${optionList(imageModelOpts(), d.imageModel || '', 'inherit')}</select></td>
     <td><select class="exv-effort">
           <option value="">inherit</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option>
         </select></td>
@@ -2108,7 +2101,6 @@ function dupExpVariantRow(rowId) {
     label: tr.querySelector('.exv-label').value,
     model: tr.querySelector('.exv-model').value,
     workerModel: tr.querySelector('.exv-worker').value,
-    imageModel: tr.querySelector('.exv-image').value,
     effort: tr.querySelector('.exv-effort').value,
     promptSuffix: tr.querySelector('.exv-suffix').value,
   });
@@ -2128,7 +2120,6 @@ function openExpModal() {
   // left blank; the worker default is optional (blank = not orchestrated).
   fillModelSelect(document.getElementById('ex-def-model'), 'claude', 'claude-sonnet-5', null);
   fillModelSelect(document.getElementById('ex-def-worker'), 'claude', '', 'none (not orchestrated)');
-  document.getElementById('ex-def-image').innerHTML = optionList(imageModelOpts(), '', 'default (Settings)');
   document.getElementById('ex-prompt').value = DEFAULT_MISSION_PROMPT;
   document.getElementById('ex-cap').value = 5;
   document.getElementById('ex-variants-body').innerHTML = '';
@@ -2154,25 +2145,21 @@ async function submitExp(ev) {
   const dWorker = document.getElementById('ex-def-worker').value.trim();
   const dEffort = document.getElementById('ex-def-effort').value;
   const dVerify = document.getElementById('ex-def-verify').value.trim();
-  const dImage = document.getElementById('ex-def-image').value.trim();
   if (dModel) defaults.model = dModel;
   if (dWorker) defaults.workerModel = dWorker;
   if (dEffort) defaults.effort = dEffort;
   if (dVerify) defaults.verifyCmd = dVerify;
-  if (dImage) defaults.imageModel = dImage;
 
   const rows = Array.from(document.querySelectorAll('#ex-variants-body tr'));
   const variants = rows.map(tr => {
     const label = tr.querySelector('.exv-label').value.trim();
     const model = tr.querySelector('.exv-model').value.trim();
     const workerModel = tr.querySelector('.exv-worker').value.trim();
-    const imageModel = tr.querySelector('.exv-image').value.trim();
     const effort = tr.querySelector('.exv-effort').value;
     const promptSuffix = tr.querySelector('.exv-suffix').value.trim();
     const overrides = {};
     if (model) overrides.model = model;
     if (workerModel) overrides.workerModel = workerModel;
-    if (imageModel) overrides.imageModel = imageModel;
     if (effort) overrides.effort = effort;
     const v = { overrides };
     if (label) v.label = label;
