@@ -93,6 +93,39 @@ function readAccessToken(credPath) {
   return findAccessToken(parsed, 0);
 }
 
+// macOS: Claude Code keeps its OAuth credentials in the login Keychain, not
+// in ~/.claude/.credentials.json, so the file read above finds nothing there
+// and the meter would sit in permanent "outage" (probe-gate mode, no ceiling
+// protection) on every Mac. The Keychain item is a generic password whose
+// secret is the same JSON blob the file holds elsewhere; `security` prints it
+// with -w. Read-only, like the file path: this never adds, updates or deletes
+// the item. Any failure (not darwin, item absent, user denied the keychain
+// prompt, bad JSON) is null, same contract as readAccessToken.
+const KEYCHAIN_SERVICE = 'Claude Code-credentials';
+
+function readKeychainToken(execImpl, platform) {
+  if ((platform || process.platform) !== 'darwin') return null;
+  const exec = execImpl || childProcess.execFileSync;
+  let raw;
+  try {
+    raw = exec('security', ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000,
+    });
+  } catch (err) {
+    return null;
+  }
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.trim());
+  } catch (err) {
+    return null;
+  }
+  return findAccessToken(parsed, 0);
+}
+
 // Defensively pull usage windows out of the endpoint's response. The
 // endpoint is undocumented and hostile (schema may change): we scan the
 // top-level entries of the response object and accept any entry whose value
@@ -131,6 +164,10 @@ class BudgetManager {
     this.settings = opts.settings || { ceilingPct: 75 };
     this.fetchImpl = opts.fetchImpl || fetch;
     this.credPath = opts.credPath || defaultCredPath();
+    // Test-only: the platform and the `security` exec used by the macOS
+    // Keychain fallback, so the darwin path is exercised from any host.
+    this.platform = opts.platform || process.platform;
+    this.execImpl = opts.execImpl || null;
 
     // Test-only, documented extensions: real callers never need to touch
     // these, but injecting small values lets tests exercise the rate-limit
@@ -153,6 +190,10 @@ class BudgetManager {
     // over (observed: five_hour back to 1% at 17:05, latch held until 22:00).
     this.forcedRecheckMs = opts.forcedRecheckMs != null ? opts.forcedRecheckMs : 5 * 60 * 1000;
     this._forcedCheckedAt = 0; // ms epoch of the last forced-latch verification
+    // Codex has no meter: a usage-limit exit sleeps that engine for this
+    // long, then the next cycle is the re-check (see noteUsageLimitExit).
+    this.codexRetryMs = opts.codexRetryMs != null ? opts.codexRetryMs : 60 * 60 * 1000;
+    this._codexLatchUntil = 0;
   }
 
   overCeiling(windows) {
@@ -183,12 +224,36 @@ class BudgetManager {
   // A cycle that exits usage_limit already proved the account is over
   // ceiling; flip the manager immediately rather than waiting for the next
   // 60s-gated poll to (eventually) learn the same thing.
-  noteUsageLimitExit() {
+  //
+  // engine (2026-09-15): 'claude' (default) latches the Anthropic meter as
+  // before. 'codex' has no meter at all - there is no endpoint that reports
+  // a ChatGPT plan's utilization - so a Codex usage-limit exit is the ONLY
+  // signal, and it latches a fixed re-try window (codexRetryMs). When it
+  // lapses the next Codex cycle is the re-check: it either works or exits
+  // usage_limit again within a minute or two, which costs almost nothing.
+  noteUsageLimitExit(engine) {
+    if (engine === 'codex') {
+      this._codexLatchUntil = Date.now() + this.codexRetryMs;
+      return;
+    }
     const fallback = this._lastResult && this._lastResult.resetsAt;
     this._forcedUntilResetsAt = fallback || new Date(Date.now() + DEFAULT_FORCED_FALLBACK_MS).toISOString();
     // Start the re-verification clock now: the exit just proved we are over,
     // so there is nothing to learn from polling for another forcedRecheckMs.
     this._forcedCheckedAt = Date.now();
+  }
+
+  // Synchronous gate for engines that have no meter. Returns the same shape
+  // as check() minus windows: {ok, reason, resetsAt}. Claude callers should
+  // keep using check(); this exists so the scheduler can ask "may a codex
+  // cycle launch" without touching the Anthropic meter at all.
+  engineOk(engine) {
+    if (engine !== 'codex') return { ok: true, reason: null, resetsAt: null };
+    const until = this._codexLatchUntil || 0;
+    if (until > Date.now()) {
+      return { ok: false, reason: 'ceiling', resetsAt: new Date(until).toISOString() };
+    }
+    return { ok: true, reason: null, resetsAt: null };
   }
 
   _resultFromCache(checkedIso) {
@@ -302,7 +367,7 @@ class BudgetManager {
 
     this._lastAttemptAt = now;
 
-    const token = readAccessToken(this.credPath);
+    const token = readAccessToken(this.credPath) || readKeychainToken(this.execImpl, this.platform);
     if (!token) {
       // Missing/unreadable credentials: meter unavailable, fall to probe
       // gate (handled by the scheduler). On 401/expired the interactive CLI
@@ -390,8 +455,9 @@ class BudgetManager {
     return new Promise((resolve) => {
       let settled = false;
       let child;
+      const cmd = util.claudeCommand();
       try {
-        child = spawnFn('claude', ['-p', 'OK', '--model', 'claude-haiku-4-5-20251001'], {
+        child = spawnFn(cmd[0], cmd.slice(1).concat(['-p', 'OK', '--model', 'claude-haiku-4-5-20251001']), {
           windowsHide: true,
           env,
         });
@@ -435,4 +501,7 @@ module.exports = {
   extractWindows,
   earliestResetsAt,
   findAccessToken,
+  readAccessToken,
+  readKeychainToken,
+  KEYCHAIN_SERVICE,
 };

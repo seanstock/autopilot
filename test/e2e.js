@@ -145,7 +145,7 @@ async function main() {
     dir: proj2,
     prompt: 'Orchestrated e2e project.',
     priority: 1,
-    model: 'claude-fable-5',
+    model: 'claude-fable-5-1',
     criticRatio: 0,
     reviewGateCycles: 0,
     containment: 'standard',

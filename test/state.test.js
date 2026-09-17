@@ -29,8 +29,8 @@ test.afterEach(() => {
 
 test('addProject validates effort (enum) and model (safe charset); drops junk', () => {
   const s = { projects: [] };
-  const p = state.addProject(s, { dir: tempProjectDir(), model: 'claude-opus-4-8', effort: 'high', workerModel: 'claude-sonnet-5', workerEffort: 'low' });
-  assert.equal(p.model, 'claude-opus-4-8');
+  const p = state.addProject(s, { dir: tempProjectDir(), model: 'claude-opus-5', effort: 'high', workerModel: 'claude-sonnet-5', workerEffort: 'low' });
+  assert.equal(p.model, 'claude-opus-5');
   assert.equal(p.effort, 'high');
   assert.equal(p.workerModel, 'claude-sonnet-5');
   assert.equal(p.workerEffort, 'low');
@@ -46,14 +46,14 @@ test('updateProject patches editable fields, validates, and can clear optionals'
   const id = p.id;
 
   // switch orchestrator to opus + raise effort
-  const u1 = state.updateProject(s, id, { model: 'claude-opus-4-8', effort: 'xhigh' });
-  assert.equal(u1.model, 'claude-opus-4-8');
+  const u1 = state.updateProject(s, id, { model: 'claude-opus-5', effort: 'xhigh' });
+  assert.equal(u1.model, 'claude-opus-5');
   assert.equal(u1.effort, 'xhigh');
 
   // invalid values are ignored, existing value preserved
   state.updateProject(s, id, { effort: 'nope', model: 'has spaces' });
   assert.equal(state.getProject(s, id).effort, 'xhigh');
-  assert.equal(state.getProject(s, id).model, 'claude-opus-4-8');
+  assert.equal(state.getProject(s, id).model, 'claude-opus-5');
 
   // clear worker model (turn orchestration off) and effort (revert default)
   const u2 = state.updateProject(s, id, { workerModel: '', effort: '' });
@@ -332,4 +332,73 @@ test('load() tolerates a dir stored with forward slashes on Windows', () => {
   });
   const result = state.load();
   assert.equal(result.projects.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// engine field (2026-09-15)
+// ---------------------------------------------------------------------------
+
+test('engine defaults to claude, accepts codex, drops anything else', () => {
+  tempHome();
+  const s = { settings: {}, projects: [] };
+  const a = state.addProject(s, { dir: tempProjectDir() });
+  assert.equal(a.engine, 'claude');
+  const b = state.addProject(s, { dir: tempProjectDir(), engine: 'codex', model: 'gpt-5.6-terra' });
+  assert.equal(b.engine, 'codex');
+  assert.equal(b.model, 'gpt-5.6-terra');
+  const c = state.addProject(s, { dir: tempProjectDir(), engine: 'gemini' });
+  assert.equal(c.engine, 'claude');
+  assert.equal(state.updateProject(s, a.id, { engine: 'codex' }).engine, 'codex');
+  assert.equal(state.updateProject(s, a.id, { engine: 'nope' }).engine, 'codex', 'invalid value ignored');
+});
+
+test('a codex project without an explicit model gets "default", not the claude default', () => {
+  tempHome();
+  const s = { settings: {}, projects: [] };
+  const p = state.addProject(s, { dir: tempProjectDir(), engine: 'codex' });
+  assert.equal(p.model, 'default');
+});
+
+test('load() fills engine:claude for projects saved before the field existed', () => {
+  const home = tempHome();
+  const dir = tempProjectDir();
+  util.writeJson(path.join(home, 'projects.json'), { settings: {}, projects: [{ id: 'old', dir, prompt: 'x' }] });
+  const loaded = state.load();
+  assert.equal(loaded.projects[0].engine, 'claude');
+  assert.equal(loaded.settings.projectsRoot, null);
+});
+
+// ---------------------------------------------------------------------------
+// engine inference + imageModel (2026-09-16)
+// ---------------------------------------------------------------------------
+
+test('engine follows the model when not given explicitly; an explicit engine wins', () => {
+  tempHome();
+  const s = { settings: {}, projects: [] };
+  const gpt = state.addProject(s, { dir: tempProjectDir(), model: 'gpt-5.6-sol' });
+  assert.equal(gpt.engine, 'codex');
+  assert.equal(gpt.model, 'gpt-5.6-sol');
+  const claude = state.addProject(s, { dir: tempProjectDir(), model: 'claude-opus-5' });
+  assert.equal(claude.engine, 'claude');
+  const local = state.addProject(s, { dir: tempProjectDir(), model: 'muse-glimmer' });
+  assert.equal(local.engine, 'claude', 'an unknown id has no opinion; default stays');
+  const explicit = state.addProject(s, { dir: tempProjectDir(), model: 'gpt-5.6-sol', engine: 'claude' });
+  assert.equal(explicit.engine, 'claude');
+
+  state.updateProject(s, claude.id, { model: 'gpt-6-astra' });
+  assert.equal(state.getProject(s, claude.id).engine, 'codex', 'a model change moves the engine too');
+  state.updateProject(s, claude.id, { model: 'claude-sonnet-5' });
+  assert.equal(state.getProject(s, claude.id).engine, 'claude');
+});
+
+test('imageModel is an optional safe-charset field, clearable on update', () => {
+  tempHome();
+  const s = { settings: {}, projects: [] };
+  const p = state.addProject(s, { dir: tempProjectDir(), imageModel: 'sd3.5-large' });
+  assert.equal(p.imageModel, 'sd3.5-large');
+  state.updateProject(s, p.id, { imageModel: '<script>' });
+  assert.equal(state.getProject(s, p.id).imageModel, 'sd3.5-large', 'junk dropped');
+  state.updateProject(s, p.id, { imageModel: '' });
+  assert.equal(state.getProject(s, p.id).imageModel, undefined);
+  assert.equal(state.load().settings.imageModel, null);
 });

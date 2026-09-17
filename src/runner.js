@@ -21,6 +21,7 @@ const events = require('./events');
 const preambles = require('./preambles');
 const containment = require('./containment');
 const localmodel = require('./localmodel');
+const engines = require('./engines');
 
 // Exit-condition regexes (SPEC.md section 4: never guess from exit codes
 // alone - context-full and usage-limit both return nonzero, and message
@@ -29,11 +30,6 @@ const localmodel = require('./localmodel');
 // stdout+stderr text).
 const USAGE_LIMIT_RE = /usage limit|rate limit|hit your limit|out of extended usage/i;
 const CONTEXT_FULL_RE = /context window|prompt is too long|context low|ran out of context/i;
-
-// Valid claude --effort levels (shared via util so state's config
-// validation and this spawn-arg guard cannot disagree); an out-of-set
-// project.effort is ignored (CLI default applies) rather than passed blindly.
-const EFFORT_LEVELS = util.EFFORT_LEVELS;
 
 // A cycle that errors out this fast with no structured result line reads as
 // a crash (bad flags, missing binary, immediate CLI failure) rather than a
@@ -52,8 +48,8 @@ const MIN_CHECK_INTERVAL_MS = 50;
 // (SPEC.md section 1), and unbounded text blocks would flood the log.
 const ACTIVITY_TEXT_CHARS = 400;
 
-function defaultClaudeCmd() {
-  return process.platform === 'win32' ? ['cmd', '/c', 'claude'] : ['claude'];
+function defaultEngineCmd(engine) {
+  return engines.command(engine);
 }
 
 function stopFilePath(dir) {
@@ -206,15 +202,19 @@ function safeEnsureContainment(project) {
   }
 }
 
-function buildPreamble(project, kind, order, notes) {
+function buildPreamble(project, kind, order, notes, imageTool) {
   try {
     if (kind === 'critic') return preambles.criticPreamble(project, notes);
     if (kind === 'wrapup') return preambles.wrapupPreamble(project);
-    if (kind === 'orchestrate') return preambles.orchestratorPreamble(project, notes);
+    if (kind === 'orchestrate') {
+      const base = preambles.orchestratorPreamble(project, notes);
+      return imageTool ? `${base}\n${preambles.imageToolSection(imageTool)}` : base;
+    }
     let base = preambles.workPreamble(project, notes);
     if (order) {
       base = `${base}\n${preambles.workerOrderSection(order)}`;
     }
+    if (imageTool) base = `${base}\n${preambles.imageToolSection(imageTool)}`;
     return base;
   } catch (err) {
     util.log('runner: preamble build failed', String(err && err.message));
@@ -237,9 +237,7 @@ function runVerifyGate(project) {
       ? project.verifyTimeoutMs
       : 10 * 60 * 1000;
 
-  const env = Object.assign({}, process.env);
-  delete env.ANTHROPIC_API_KEY;
-  delete env.ANTHROPIC_AUTH_TOKEN;
+  const env = engines.cycleEnv();
 
   const bin = process.platform === 'win32' ? 'cmd' : 'sh';
   // /d /s /c plus windowsVerbatimArguments: cmd.exe's own quote-stripping
@@ -322,55 +320,10 @@ function consumeInjection(project, kind, cycleNumber, order) {
   return text;
 }
 
-function extractAssistantTexts(parsedLine) {
-  const content =
-    parsedLine && parsedLine.message && Array.isArray(parsedLine.message.content)
-      ? parsedLine.message.content
-      : [];
-  const texts = [];
-  for (const block of content) {
-    if (block && block.type === 'text' && typeof block.text === 'string') {
-      texts.push(block.text);
-    }
-  }
-  return texts;
-}
-
-function resultInfoFrom(parsedLine) {
-  const usage = (parsedLine && parsedLine.usage) || {};
-  const inputTokens =
-    (usage.input_tokens || 0) +
-    (usage.cache_read_input_tokens || 0) +
-    (usage.cache_creation_input_tokens || 0);
-  return {
-    subtype: parsedLine.subtype || null,
-    isError: parsedLine.is_error === true,
-    tokens: { in: inputTokens, out: usage.output_tokens || 0 },
-    costUsd: typeof parsedLine.total_cost_usd === 'number' ? parsedLine.total_cost_usd : null,
-    modelUsage: normalizeModelUsage(parsedLine.modelUsage),
-  };
-}
-
-// stream-json's result line carries a per-model usage/cost breakdown that
-// INCLUDES subagent activity (verified empirically 2026-07-24: a Task
-// subagent's turns and cost appear in the parent's usage/modelUsage).
-// Normalize it to our shape so orchestrate cycles that fan out to scout
-// subagents attribute cost to the models that actually ran, not just the
-// configured one. Parsed defensively - absent/foreign shapes yield null
-// and the caller falls back to whole-cycle single-model attribution.
-function normalizeModelUsage(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const out = {};
-  for (const [model, u] of Object.entries(raw)) {
-    if (!u || typeof u !== 'object') continue;
-    out[model] = {
-      in: (Number(u.inputTokens) || 0) + (Number(u.cacheReadInputTokens) || 0) + (Number(u.cacheCreationInputTokens) || 0),
-      out: Number(u.outputTokens) || 0,
-      costUsd: Number(u.costUSD) || 0,
-    };
-  }
-  return Object.keys(out).length ? out : null;
-}
+// Per-engine stdout line interpretation (assistant text for ACTIVITY.log,
+// the final result/usage line) lives in src/engines.js so both engines are
+// testable without their CLIs. The Claude stream-json rules are unchanged
+// from when they lived here, including the modelUsage subagent rollup.
 
 /**
  * Run one headless claude cycle.
@@ -387,7 +340,8 @@ function normalizeModelUsage(raw) {
  *   and does not consume a pending INJECT.md this cycle.
  * @param {string[]} [opts.claudeCmd] - command + leading args, e.g.
  *   ['cmd','/c','claude'] or [process.execPath, 'test/fake-claude.js'].
- *   Defaults to ['cmd','/c','claude'] on win32, ['claude'] elsewhere.
+ *   Defaults to the project's engine CLI (src/engines.js command()). The
+ *   name predates the second engine; it overrides whichever engine runs.
  * @returns {Promise<{exit:string, code:number|null, minutes:number,
  *   tokens:{in:number,out:number}, costUsd:number|null,
  *   commit:string|null, gitDiff:{files:number,ins:number,del:number},
@@ -415,37 +369,50 @@ async function runCycle(opts) {
       ? orchestrateSettingsPath || settingsPath
       : settingsPath;
   const preHead = gitRevParseHead(dir);
-  let preamble = buildPreamble(project, kind, order, opts.notes);
+  // Image generation is offered to the cycle only when a provider key is
+  // stored; otherwise the section is omitted and the model never hears of
+  // a tool it could not use.
+  const pk = opts.providerKeys || {};
+  const imageTool = (pk.openai || pk.stability)
+    ? {
+      scriptPath: path.join(containment.INSTALL_DIR, 'image.js'),
+      model: project.imageModel || opts.defaultImageModel || null,
+      providers: [pk.openai ? 'openai' : null, pk.stability ? 'stability' : null].filter(Boolean),
+    }
+    : null;
+  let preamble = buildPreamble(project, kind, order, opts.notes, imageTool);
   const injection = consumeInjection(project, kind, cycleNumber, order);
   if (injection) {
     preamble = `${preamble}\n${preambles.injectionSection(injection, !!project.workerModel)}`;
   }
 
-  const cmd = opts.claudeCmd && opts.claudeCmd.length ? opts.claudeCmd : defaultClaudeCmd();
+  const engine = engines.normalizeEngine(project.engine);
+  const cmd = opts.claudeCmd && opts.claudeCmd.length ? opts.claudeCmd : defaultEngineCmd(engine);
   const bin = cmd[0];
-  const args = cmd.slice(1).concat(['-p', '--model', project.model]);
-  // Reasoning effort (code.claude.com/docs/en/model-config): passed via the
-  // --effort CLI flag so it can differ per cycle (the scheduler routes the
+  // Reasoning effort is passed per cycle (the scheduler routes the
   // orchestrator's effort to orchestrate cycles and workerEffort to worker
-  // cycles by swapping project.effort). Omitted entirely when unset, so the
-  // CLI default (high on current models) applies. Validated against the
-  // known level set to keep an unexpected value from reaching the CLI.
-  if (EFFORT_LEVELS.has(project.effort)) {
-    args.push('--effort', project.effort);
-  }
-  args.push(
-    '--permission-mode',
-    'acceptEdits',
-    '--settings',
-    effectiveSettingsPath,
-    '--output-format',
-    'stream-json',
-    '--verbose'
-  );
+  // cycles by swapping project.effort); an unset or out-of-set value is
+  // omitted so the CLI's own default applies. Per-engine argv shapes and the
+  // Codex effort mapping live in src/engines.js.
+  const args = cmd.slice(1).concat(engines.cycleArgs({
+    engine,
+    model: project.model,
+    effort: project.effort,
+    settingsPath: effectiveSettingsPath,
+    dir,
+    containment: project.containment,
+  }));
 
-  const env = Object.assign({}, process.env);
-  delete env.ANTHROPIC_API_KEY;
-  delete env.ANTHROPIC_AUTH_TOKEN;
+  // Ambient API keys stripped, for every engine, so cycles bill the
+  // subscription the CLI is signed into; then the keys the user stored on
+  // the Settings page are injected back (see engines.cycleEnv). The
+  // scheduler passes providerKeys + codexLoggedIn; tests may omit both.
+  const keysModule = require('./keys');
+  const providerKeys = opts.providerKeys || { openai: null, stability: null, sources: {} };
+  const env = engines.cycleEnv(process.env, keysModule.cycleEnvVars(providerKeys, {
+    engine,
+    codexLoggedIn: opts.codexLoggedIn,
+  }));
 
   // A model served on this machine is reached by pointing the CLI at the local
   // router, and that happens HERE, per cycle, rather than by requiring the
@@ -458,7 +425,7 @@ async function runCycle(opts) {
   // project.model is the EFFECTIVE model for this cycle - scheduler.js swaps in
   // workerModel for worker cycles - so subagent cycles are covered too.
   const lm = localmodel.readConfig();
-  if (project.model && project.model === lm.id) {
+  if (engine === 'claude' && project.model && project.model === lm.id) {
     env.ANTHROPIC_BASE_URL = lm.routerUrl;
   }
 
@@ -519,17 +486,15 @@ async function runCycle(opts) {
         // extraction.
         return;
       }
-      if (parsed && parsed.type === 'assistant') {
-        for (const text of extractAssistantTexts(parsed)) {
-          try {
-            events.activity(dir, text.slice(0, ACTIVITY_TEXT_CHARS), 'model');
-          } catch (err) {
-            util.log('runner: activity() failed for', dir, String(err && err.message));
-          }
+      const interpreted = engines.parseLine(engine, parsed);
+      for (const text of interpreted.texts) {
+        try {
+          events.activity(dir, text.slice(0, ACTIVITY_TEXT_CHARS), 'model');
+        } catch (err) {
+          util.log('runner: activity() failed for', dir, String(err && err.message));
         }
-      } else if (parsed && parsed.type === 'result') {
-        resultInfo = resultInfoFrom(parsed);
       }
+      if (interpreted.result) resultInfo = interpreted.result;
     }
 
     let settled = false;
@@ -598,7 +563,7 @@ async function runCycle(opts) {
     exit = 'usage_limit';
     try {
       if (budget && typeof budget.noteUsageLimitExit === 'function') {
-        budget.noteUsageLimitExit();
+        budget.noteUsageLimitExit(engine);
       }
     } catch (err) {
       util.log('runner: noteUsageLimitExit threw', String(err && err.message));

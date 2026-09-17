@@ -627,3 +627,120 @@ test('a worker cycle carrying the local model is redirected too', async () => {
   const seen = JSON.parse(fs.readFileSync(path.join(dir, 'env_seen.json'), 'utf8'));
   assert.equal(seen.ANTHROPIC_BASE_URL, cfg.routerUrl);
 });
+
+// ---------------------------------------------------------------------------
+// codex engine (2026-09-15)
+// ---------------------------------------------------------------------------
+//
+// A project with engine:'codex' runs `codex exec --json` instead of
+// `claude -p`. The fake codex mimics the JSONL contract; the runner's job
+// is the same as for claude: preamble on stdin, keys stripped, tokens read
+// from the final usage line, auto-commit after.
+
+const FAKE_CODEX_PATH = path.join(__dirname, 'fake-codex.js');
+function fakeCodexCmd() {
+  return [process.execPath, FAKE_CODEX_PATH];
+}
+
+test('codex engine: exec argv, stdin preamble, tokens from turn.completed, commit created', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir, { engine: 'codex', model: 'default', effort: 'high' });
+  const budget = mockBudget();
+
+  process.env.OPENAI_API_KEY = 'should-be-stripped';
+  process.env.CODEX_API_KEY = 'should-be-stripped';
+  let result;
+  try {
+    result = await withFakeMode('clean', () =>
+      runCycle({ project, kind: 'work', cycleNumber: 1, budget, claudeCmd: fakeCodexCmd() })
+    );
+  } finally {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.CODEX_API_KEY;
+  }
+
+  assert.equal(result.exit, 'clean');
+  assert.deepEqual(result.tokens, { in: 2400, out: 150 });
+  assert.equal(result.costUsd, null);
+  assert.ok(result.commit, 'auto-commit still happens for codex cycles');
+
+  const seen = JSON.parse(fs.readFileSync(path.join(dir, 'env_seen.json'), 'utf8'));
+  const argv = seen.argv.join(' ');
+  assert.match(argv, /^exec --json -C /);
+  assert.match(argv, /--sandbox workspace-write/);
+  assert.match(argv, /model_reasoning_effort="high"/);
+  assert.doesNotMatch(argv, / -m /, '"default" model sends no -m');
+  assert.doesNotMatch(argv, /--settings|stream-json/, 'no claude flags leak into a codex cycle');
+  assert.equal(seen.OPENAI_API_KEY, null);
+  assert.equal(seen.CODEX_API_KEY, null);
+  // The daemon's own environment may legitimately carry ANTHROPIC_BASE_URL
+  // (this test runs inside Claude Code, which sets it); what must not
+  // happen is the runner pointing a codex cycle at the local-model router.
+  assert.notEqual(seen.ANTHROPIC_BASE_URL, require('../src/localmodel').readConfig().routerUrl, 'local-model routing is claude-only');
+
+  const prompt = fs.readFileSync(path.join(dir, 'received_prompt.txt'), 'utf8');
+  assert.match(prompt, /PLAN\.md/, 'the work preamble reached codex on stdin');
+});
+
+test('codex engine: a usage-limit exit is classified and latches the codex engine, not the claude meter', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir, { engine: 'codex', model: 'default' });
+  const seenEngines = [];
+  const budget = Object.assign(mockBudget(), { noteUsageLimitExit(engine) { seenEngines.push(engine); } });
+
+  const result = await withFakeMode('usage_limit', () =>
+    runCycle({ project, kind: 'work', cycleNumber: 1, budget, claudeCmd: fakeCodexCmd() })
+  );
+  assert.equal(result.exit, 'usage_limit');
+  assert.deepEqual(seenEngines, ['codex']);
+});
+
+// ---------------------------------------------------------------------------
+// provider keys (2026-09-16): stored keys reach the cycle, ambient ones do not
+// ---------------------------------------------------------------------------
+
+test('stored provider keys are injected into the cycle env; CODEX_API_KEY only when codex is signed out', async () => {
+  const dir = tempProjectRepo();
+  const project = baseProject(dir, { engine: 'codex', model: 'default' });
+  const providerKeys = { openai: 'sk-stored-openai', stability: 'sk-stored-stab', sources: {} };
+  process.env.OPENAI_API_KEY = 'ambient-should-not-leak';
+  let seen;
+  try {
+    await withFakeMode('clean', () =>
+      runCycle({ project, kind: 'work', cycleNumber: 1, budget: mockBudget(), claudeCmd: fakeCodexCmd(), providerKeys, codexLoggedIn: false })
+    );
+    seen = JSON.parse(fs.readFileSync(path.join(dir, 'env_seen.json'), 'utf8'));
+  } finally {
+    delete process.env.OPENAI_API_KEY;
+  }
+  assert.equal(seen.OPENAI_API_KEY, 'sk-stored-openai');
+  assert.equal(seen.CODEX_API_KEY, 'sk-stored-openai');
+
+  const dir2 = tempProjectRepo();
+  await withFakeMode('clean', () =>
+    runCycle({ project: baseProject(dir2, { engine: 'codex', model: 'default' }), kind: 'work', cycleNumber: 1, budget: mockBudget(), claudeCmd: fakeCodexCmd(), providerKeys, codexLoggedIn: true })
+  );
+  const seen2 = JSON.parse(fs.readFileSync(path.join(dir2, 'env_seen.json'), 'utf8'));
+  assert.equal(seen2.OPENAI_API_KEY, 'sk-stored-openai');
+  assert.equal(seen2.CODEX_API_KEY, null, 'signed-in codex keeps subscription billing');
+});
+
+test('the image-generation section reaches the preamble only when a provider key is stored', async () => {
+  const dir = tempProjectRepo();
+  await withFakeMode('clean', () =>
+    runCycle({ project: baseProject(dir, { imageModel: 'sd3.5-medium' }), kind: 'work', cycleNumber: 1, budget: mockBudget(), claudeCmd: fakeCmd(),
+      providerKeys: { openai: null, stability: 'sk-s', sources: {} } })
+  );
+  const prompt = fs.readFileSync(path.join(dir, 'received_prompt.txt'), 'utf8');
+  assert.match(prompt, /## Image generation/);
+  assert.match(prompt, /image\.js/);
+  assert.match(prompt, /sd3\.5-medium/);
+  assert.match(prompt, /Stability AI/);
+  assert.doesNotMatch(prompt, /sk-s\b/, 'the key never enters the prompt');
+
+  const dir2 = tempProjectRepo();
+  await withFakeMode('clean', () =>
+    runCycle({ project: baseProject(dir2), kind: 'work', cycleNumber: 1, budget: mockBudget(), claudeCmd: fakeCmd() })
+  );
+  assert.doesNotMatch(fs.readFileSync(path.join(dir2, 'received_prompt.txt'), 'utf8'), /## Image generation/);
+});

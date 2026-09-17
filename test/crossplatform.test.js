@@ -157,3 +157,45 @@ test('no boot plan touches a path outside the user home', () => {
     }
   }
 });
+
+// ---- PATH baked into the login entry ---------------------------------------
+//
+// launchd and systemd --user start the daemon with a bare system PATH, so a
+// daemon registered at login could not find `claude`, `git`, or `node` (the
+// guard hook's JSON parser) when they live in Homebrew, ~/.local/bin or nvm.
+// The registering shell's PATH is captured into the entry so the daemon sees
+// what the user sees.
+
+const USER_PATH = '/opt/homebrew/bin:/home/someone/.local/bin:/usr/bin:/bin';
+
+test('macos boot on bakes the registering PATH into the plist', () => {
+  const p = buildBootPlan('darwin', 'on', NODE, SCRIPT, HOME, USER_PATH);
+  assert.match(p.content, /<key>EnvironmentVariables<\/key>\s*<dict>\s*<key>PATH<\/key>\s*<string>\/opt\/homebrew\/bin:[^<]*<\/string>\s*<\/dict>/);
+});
+
+test('linux boot on bakes the registering PATH into the unit', () => {
+  const p = buildBootPlan('linux', 'on', NODE, SCRIPT, HOME, USER_PATH);
+  assert.match(p.content, /^Environment=PATH=\/opt\/homebrew\/bin:/m);
+});
+
+test('an absent PATH leaves the entries without an environment block', () => {
+  assert.doesNotMatch(buildBootPlan('darwin', 'on', NODE, SCRIPT, HOME).content, /EnvironmentVariables/);
+  assert.doesNotMatch(buildBootPlan('linux', 'on', NODE, SCRIPT, HOME).content, /^Environment=/m);
+});
+
+test('plist values are XML-escaped', () => {
+  const p = buildBootPlan('darwin', 'on', '/opt/a&b/node', SCRIPT, HOME, '/x<y:/bin');
+  assert.match(p.content, /<string>\/opt\/a&amp;b\/node<\/string>/);
+  assert.match(p.content, /<string>\/x&lt;y:\/bin<\/string>/);
+  assert.doesNotMatch(p.content, /a&b|x<y/);
+});
+
+// ---- the claude CLI invocation ----------------------------------------------
+
+const util = require('../src/util');
+
+test('claudeCommand goes through cmd /c on windows and is bare elsewhere', () => {
+  assert.deepEqual(util.claudeCommand('win32'), ['cmd', '/c', 'claude']);
+  assert.deepEqual(util.claudeCommand('darwin'), ['claude']);
+  assert.deepEqual(util.claudeCommand('linux'), ['claude']);
+});

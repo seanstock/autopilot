@@ -14,7 +14,7 @@
   "current": { "projectId": "spacestation", "cycle": 41, "kind": "work", "startedIso": "2026-07-23T07:45:53-07:00" },
   "totals": { "in": 512400000, "out": 4180000, "costUsd": 947.13, "cycles": 71,
     "byModel": {
-      "claude-fable-5": { "in": 391000000, "out": 3100000, "costUsd": 802.4, "cycles": 41 },
+      "claude-fable-5-1": { "in": 391000000, "out": 3100000, "costUsd": 802.4, "cycles": 41 },
       "claude-sonnet-5": { "in": 121400000, "out": 1080000, "costUsd": 144.73, "cycles": 30 } } },
   "projects": [
     {
@@ -23,7 +23,7 @@
       "prompt": "Build out the SpaceStation asset kit: modular hab ring, docking collar, solar arrays, interior corridor kit. Keep density consistent with the concept ref in refs/. Prioritize render-time verified fixes over cosmetic claims.",
       "priority": 1,
       "enabled": true,
-      "model": "claude-opus-4-8",
+      "model": "claude-opus-5",
       "effort": "high",
       "workerModel": "claude-sonnet-5",
       "workerEffort": "medium",
@@ -38,7 +38,7 @@
       "lastExit": "clean",
       "lastCommit": "abc1234",
       "totals": { "in": 391000000, "out": 3100000, "costUsd": 802.4, "cycles": 41,
-        "byModel": { "claude-fable-5": { "in": 391000000, "out": 3100000, "costUsd": 802.4, "cycles": 41 } } },
+        "byModel": { "claude-fable-5-1": { "in": 391000000, "out": 3100000, "costUsd": 802.4, "cycles": 41 } } },
       "orders": { "open": 1, "inProgress": 1, "done": 2, "blocked": 1 },
       "_mock": {
         "orders": [
@@ -49,7 +49,7 @@
           { "id": "005-corridor-kit", "title": "Interior corridor kit: 3 modular sections + trim sheet", "status": "open" }
         ],
         "activity": [
-          "[2026-07-23T07:45:53-07:00] [daemon] cycle 41 start · work · claude-fable-5 · timeout 120m",
+          "[2026-07-23T07:45:53-07:00] [daemon] cycle 41 start · work · claude-fable-5-1 · timeout 120m",
           "[2026-07-23T07:46:31-07:00] [model] Read PLAN.md, 5 open items. Taking: solar array deployment animation.",
           "[2026-07-23T07:52:08-07:00] [model] Blocking keyframes for panel unfold, 4 stages, 180 frames.",
           "[2026-07-23T08:04:40-07:00] [model] Checkpoint: saved solar_deploy_v1.blend, PLAN ticked, WORKLOG updated.",
@@ -83,7 +83,7 @@
       "prompt": "Maintain and extend the Dante data warehouse: profile data quality, backfill glossary terms, build out nightly report templates. Flag anything that looks like a migration artifact rather than a live data quality issue.",
       "priority": 2,
       "enabled": true,
-      "model": "claude-fable-5",
+      "model": "claude-fable-5-1",
       "maxCycleMinutes": 90,
       "criticRatio": 4,
       "reviewGateCycles": 0,

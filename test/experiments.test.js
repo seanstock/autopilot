@@ -117,7 +117,7 @@ test('createExperiment registers N projects with experimentId/experimentLabel/ma
     cycleCap: 5,
     variants: [
       { label: 'a', overrides: {}, promptSuffix: '' },
-      { label: 'b', overrides: { model: 'claude-opus-4-8' }, promptSuffix: 'Use a bold red palette.' },
+      { label: 'b', overrides: { model: 'claude-opus-5' }, promptSuffix: 'Use a bold red palette.' },
     ],
   });
 
@@ -133,7 +133,7 @@ test('createExperiment registers N projects with experimentId/experimentLabel/ma
 
   assert.equal(projB.experimentId, record.id);
   assert.equal(projB.experimentLabel, 'b');
-  assert.equal(projB.model, 'claude-opus-4-8');
+  assert.equal(projB.model, 'claude-opus-5');
   assert.equal(projB.prompt, `${body.basePrompt}\n\nUse a bold red palette.`);
 
   // persisted to projects.json
@@ -160,7 +160,7 @@ test('createExperiment applies overrides and fills defaults where a variant has 
     defaults: { model: 'claude-sonnet-5', workerModel: 'claude-haiku-4-5-20251001', effort: 'high' },
     variants: [
       { label: 'default-all', overrides: {}, promptSuffix: '' },
-      { label: 'override-model', overrides: { model: 'claude-opus-4-8' }, promptSuffix: '' },
+      { label: 'override-model', overrides: { model: 'claude-opus-5' }, promptSuffix: '' },
     ],
   });
 
@@ -172,7 +172,7 @@ test('createExperiment applies overrides and fills defaults where a variant has 
   assert.equal(defAll.workerModel, 'claude-haiku-4-5-20251001');
   assert.equal(defAll.effort, 'high');
 
-  assert.equal(overrideModel.model, 'claude-opus-4-8', 'per-variant override wins over defaults');
+  assert.equal(overrideModel.model, 'claude-opus-5', 'per-variant override wins over defaults');
   assert.equal(overrideModel.workerModel, 'claude-haiku-4-5-20251001', 'unset fields still take the default');
 });
 

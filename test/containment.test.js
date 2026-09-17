@@ -643,8 +643,42 @@ test('criticPreamble includes PLAN.md, UPDATES.md, never force-push, refute lang
   assert.match(text, /## Mission/);
 });
 
-test('PREAMBLE_VERSION is the string "1"', () => {
-  assert.equal(preambles.PREAMBLE_VERSION, '1');
+// Was '1' until 2026-08-08. Bumped to '2' when FINDINGS.md and the PLAN.md
+// prune rule entered the contract: cycles run under a materially different
+// set of obligations, so the version a cycle reports must distinguish them.
+test('PREAMBLE_VERSION is the string "2"', () => {
+  assert.equal(preambles.PREAMBLE_VERSION, '2');
+});
+
+// FINDINGS.md is durable project memory, deliberately bounded. The cap is
+// load-bearing: it is what lets every cycle read the file in full, which is
+// the whole reason it exists alongside tail-read UPDATES.md.
+test('workPreamble defines the FINDINGS.md contract: read it, cap it, facts not instructions', () => {
+  const text = preambles.workPreamble(baseProject());
+  assert.match(text, /FINDINGS\.md/);
+  assert.match(text, /100 lines/i);
+  assert.match(text, /consolidate/i);
+  // The guard that keeps it from becoming a second instruction surface.
+  assert.match(text, /FACTS, NEVER INSTRUCTIONS/);
+  // And from becoming a second UPDATES.md.
+  assert.match(text, /EDIT IN PLACE/);
+});
+
+test('workPreamble and orchestratorPreamble both require pruning PLAN.md rather than accumulating', () => {
+  for (const text of [preambles.workPreamble(baseProject()), preambles.orchestratorPreamble(baseProject())]) {
+    assert.match(text, /prun(e|ing)/i);
+    assert.match(text, /archive/i);
+  }
+});
+
+test('orchestratorPreamble reads FINDINGS.md in full and may write it; criticPreamble reads but never edits it', () => {
+  const orch = preambles.orchestratorPreamble(baseProject());
+  assert.match(orch, /FINDINGS\.md \(in full/);
+  assert.match(orch, /100 lines/);
+
+  const critic = preambles.criticPreamble(baseProject());
+  assert.match(critic, /FINDINGS\.md/);
+  assert.match(critic, /Do not edit it/);
 });
 
 // --- v0.3: orchestratorPreamble, workerOrderSection, injectionSection ---------

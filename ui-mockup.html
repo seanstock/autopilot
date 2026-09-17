@@ -244,7 +244,7 @@
     </div>
     <div class="fgrid">
       <div class="frow"><label>Priority</label><input type="number" value="2" min="1"></div>
-      <div class="frow"><label>Model</label><select><option>claude-fable-5</option><option>claude-opus-4-8</option><option>claude-sonnet-5</option></select></div>
+      <div class="frow"><label>Model</label><select><option>claude-fable-5-1</option><option>claude-sonnet-5</option></select></div>
       <div class="frow"><label>Max cycle (min)</label><input type="number" value="120"></div>
       <div class="frow"><label>Critic ratio</label><input type="number" value="5" min="0" title="every Nth cycle is a critic; 0 = off"></div>
       <div class="frow"><label>Review gate</label><input type="number" value="0" min="0" title="pause for review after N cycles; 0 = off"></div>
@@ -260,7 +260,7 @@ const projects = [
   {
     id: 'spacestation', name: 'spacestation', prio: 1, status: 'running',
     statusTxt: 'running cycle 41 (work) &middot; 34m', dir: 'C:/Users/you/Blender/SpaceStations',
-    model: 'claude-fable-5', critic: 5, gate: 0, contain: 'standard', commit: 'abc1234',
+    model: 'claude-fable-5-1', critic: 5, gate: 0, contain: 'standard', commit: 'abc1234',
     updates: [
       ['Jul 23, 08:04', 'Cycle 41, in progress. Blocked out the solar array deployment animation, four unfold stages over 180 frames. Hit a hinge intersecting the truss at frame 120 and fixed it. Next up is the interior corridor kit. Nothing uncertain right now.'],
       ['Jul 23, 06:12', 'Cycle 40. Finished the docking collar UV fix and re-rendered the affected turntable frames. The seam artifact is gone at render time, verified against the 07-21 output. Started planning the corridor kit before wrapping up.'],
@@ -282,7 +282,7 @@ const projects = [
       { c: 36, k: 'work',   m: '18.1',  exit: 'usage_limit',  tok: '0.4M / 21k',  diff: '+61 / -4',  commit: '9e0d144' },
     ],
     tail: [
-      ['d', '07:45:53', 'cycle 41 start &middot; work &middot; claude-fable-5 &middot; timeout 120m'],
+      ['d', '07:45:53', 'cycle 41 start &middot; work &middot; claude-fable-5-1 &middot; timeout 120m'],
       ['m', '07:46:31', 'Read PLAN.md, 5 open items. Taking: solar array deployment animation.'],
       ['m', '07:52:08', 'Blocking keyframes for panel unfold, 4 stages, 180 frames.'],
       ['m', '08:04:40', 'Checkpoint: saved solar_deploy_v1.blend, PLAN ticked, WORKLOG updated.'],
@@ -293,7 +293,7 @@ const projects = [
   {
     id: 'dante-warehouse', name: 'dante-warehouse', prio: 2, status: 'queued',
     statusTxt: 'queued &middot; next after spacestation', dir: 'C:/Users/you/Dante',
-    model: 'claude-fable-5', critic: 4, gate: 0, contain: 'standard', commit: '20cf881',
+    model: 'claude-fable-5-1', critic: 4, gate: 0, contain: 'standard', commit: '20cf881',
     updates: [
       ['Jul 23, 06:58', 'Cycle 17. Profiled null rates on orders.customer_ref: 4.2% overall, but concentrated in pre-2024 rows, which looks like a migration artifact rather than an ongoing data quality problem. Wrote it up in the glossary. Next is backfilling terms for the revenue views.'],
     ],

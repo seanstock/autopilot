@@ -661,3 +661,109 @@ test('notify() posts to webhook when settings.webhook is set', async () => {
 test('notify() does not throw when webhook URL is invalid', () => {
   assert.doesNotThrow(() => notify('T', 'B', { webhook: 'not a url at all' }));
 });
+
+// ---------------------------------------------------------------------------
+// macOS Keychain fallback
+// ---------------------------------------------------------------------------
+//
+// Claude Code on macOS keeps its OAuth credentials in the login Keychain, not
+// in ~/.claude/.credentials.json. Without this fallback a Mac never reads the
+// meter and lives in probe-gate mode with no ceiling, which is the opposite of
+// what the budget manager is for. `security` is read-only here: -w prints the
+// secret, nothing is added, updated or deleted.
+
+const { readKeychainToken, KEYCHAIN_SERVICE } = require('../src/budget');
+
+test('readKeychainToken parses the JSON blob security prints on darwin', () => {
+  let seen = null;
+  const exec = (bin, args) => {
+    seen = { bin, args };
+    return JSON.stringify({ claudeAiOauth: { accessToken: 'kc-tok', refreshToken: 'never-used' } }) + '\n';
+  };
+  assert.equal(readKeychainToken(exec, 'darwin'), 'kc-tok');
+  assert.equal(seen.bin, 'security');
+  assert.deepEqual(seen.args, ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w']);
+});
+
+test('readKeychainToken is null off darwin, never even calling security', () => {
+  let called = 0;
+  const exec = () => { called += 1; return '{"accessToken":"x"}'; };
+  assert.equal(readKeychainToken(exec, 'win32'), null);
+  assert.equal(readKeychainToken(exec, 'linux'), null);
+  assert.equal(called, 0);
+});
+
+test('readKeychainToken is null when the item is absent, denied, or not JSON', () => {
+  assert.equal(readKeychainToken(() => { throw new Error('item not found'); }, 'darwin'), null);
+  assert.equal(readKeychainToken(() => '', 'darwin'), null);
+  assert.equal(readKeychainToken(() => 'not json', 'darwin'), null);
+  assert.equal(readKeychainToken(() => '{"nothing":"here"}', 'darwin'), null);
+});
+
+test('check() falls back to the Keychain token when the credentials file has none', async () => {
+  const credPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-nocred-')), 'missing.json');
+  let authHeader = null;
+  const fetchImpl = async (url, opts) => {
+    authHeader = opts.headers.Authorization;
+    return { status: 200, json: async () => ({ five_hour: { utilization: 10 } }) };
+  };
+  const mgr = new BudgetManager({
+    settings: { ceilingPct: 75 },
+    fetchImpl,
+    credPath,
+    platform: 'darwin',
+    execImpl: () => JSON.stringify({ claudeAiOauth: { accessToken: 'kc-tok' } }),
+  });
+  const result = await mgr.check();
+  assert.equal(result.ok, true);
+  assert.equal(authHeader, 'Bearer kc-tok');
+});
+
+test('probeGate spawns the CLI through the platform wrapper, not a bare name', async () => {
+  const mgr = new BudgetManager({ settings: { ceilingPct: 75 } });
+  let seen = null;
+  const fakeSpawn = (cmd, args) => {
+    seen = { cmd, args };
+    const { EventEmitter } = require('events');
+    const child = new EventEmitter();
+    child.kill = () => {};
+    process.nextTick(() => child.emit('exit', 0));
+    return child;
+  };
+  await mgr.probeGate(fakeSpawn);
+  const expected = require('../src/util').claudeCommand();
+  assert.equal(seen.cmd, expected[0]);
+  assert.deepEqual(seen.args.slice(0, expected.length - 1), expected.slice(1));
+  assert.ok(seen.args.includes('-p'));
+});
+
+// ---------------------------------------------------------------------------
+// codex engine latch (2026-09-15)
+// ---------------------------------------------------------------------------
+//
+// Codex has no usage-meter endpoint. A usage-limit exit from a codex cycle
+// sleeps that engine for codexRetryMs, and the next codex cycle after that
+// is the re-check. The Anthropic meter must be untouched by it either way.
+
+test('noteUsageLimitExit("codex") latches only the codex gate, for codexRetryMs', async () => {
+  const mgr = new BudgetManager({ settings: { ceilingPct: 75 }, codexRetryMs: 50 });
+  assert.equal(mgr.engineOk('codex').ok, true);
+  assert.equal(mgr.engineOk('claude').ok, true, 'claude never uses engineOk gating');
+
+  mgr.noteUsageLimitExit('codex');
+  const gate = mgr.engineOk('codex');
+  assert.equal(gate.ok, false);
+  assert.equal(gate.reason, 'ceiling');
+  assert.ok(gate.resetsAt);
+  assert.equal(mgr._forcedUntilResetsAt, null, 'the Anthropic forced latch is not set by a codex exit');
+
+  await new Promise((r) => setTimeout(r, 70));
+  assert.equal(mgr.engineOk('codex').ok, true, 'latch lapses on its own');
+});
+
+test('noteUsageLimitExit() with no engine keeps the original claude behaviour', () => {
+  const mgr = new BudgetManager({ settings: { ceilingPct: 75 } });
+  mgr.noteUsageLimitExit();
+  assert.ok(mgr._forcedUntilResetsAt);
+  assert.equal(mgr.engineOk('codex').ok, true);
+});

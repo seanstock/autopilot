@@ -1,7 +1,7 @@
 # Goal-loop orchestration for Autopilot (design note, 2026-07-24)
 
 How Autopilot could adopt the orchestrator + worker pattern: a top-tier
-model (Fable 5) steering work against a standing goal, cheaper models
+model (Fable 5.1) steering work against a standing goal, cheaper models
 executing it. Grounded in Anthropic's published guidance, community
 goal-loop practice (Ralph loop, Beads/Gas Town, refined playbooks), and
 the build of Autopilot itself, which was constructed by exactly this

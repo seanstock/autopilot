@@ -169,8 +169,28 @@
   .plan .box.tick { color: var(--success); }
 
   /* ---------- Modal ---------- */
-  #modalBg, #expModalBg, #addVarBg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 10; }
-  #modalBg.on, #expModalBg.on, #addVarBg.on { display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; }
+  #modalBg, #expModalBg, #addVarBg, #settingsBg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 10; }
+  #modalBg.on, #expModalBg.on, #addVarBg.on, #settingsBg.on { display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh; }
+  /* settings page */
+  .settings-modal { width: 640px; }
+  .settings-section { margin-bottom: 24px; }
+  .settings-section h4 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .settings-section p.hint, .settings-section ol.hint { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.5; }
+  .engine-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); font-size: 13px; }
+  .engine-row:last-child { border-bottom: 1px solid var(--border); }
+  .engine-row .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); flex: none; }
+  .engine-row .dot.off { background: var(--text-secondary); }
+  .engine-row .dot.warn { background: var(--warning); }
+  .engine-row .e-name { min-width: 190px; }
+  .engine-row .e-detail { flex: 1; color: var(--text-secondary); font-size: 12px; font-family: var(--font-mono); }
+  .engine-row button { font-size: 12px; padding: 4px 10px; }
+  .dir-browser { display: none; margin-top: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); max-height: 220px; overflow-y: auto; }
+  .dir-browser .db-head { padding: 6px 10px; font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; }
+  .dir-browser .db-head span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dir-browser .db-head button { font-size: 11px; padding: 3px 8px; }
+  .dir-browser .db-row { padding: 5px 10px; cursor: pointer; font-size: 12px; font-family: var(--font-mono); }
+  .dir-browser .db-row:hover { background: var(--surface-2); }
+  .dir-browser .db-empty { padding: 5px 10px; font-size: 12px; color: var(--text-secondary); }
   .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; width: 520px; max-width: 92vw; max-height: 84vh; overflow-y: auto; }
   .modal h3 { font-size: 20px; font-weight: 600; margin-bottom: 16px; }
   .frow { display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }
@@ -286,6 +306,7 @@
       <div class="ctl-row"><span>concurrency</span><input type="number" id="concurrency" value="1" min="1" max="8" title="cycle slots: how many cycles run at once across different projects (a single project is always one at a time)"> <span>slots</span></div>
       <button id="pauseBtn" onclick="togglePause()">Pause all</button>
       <button onclick="editNotes()" title="Notes prepended to every project mission">Universal Notes</button>
+      <button onclick="openSettings()" title="Engines, sign-in, projects folder">Settings</button>
     </div>
   </header>
 
@@ -334,23 +355,35 @@
     <form id="addForm" onsubmit="submitAdd(event)">
       <div class="frow"><label>Directory</label>
         <div style="display:flex; gap:8px">
-          <input type="text" id="f-dir" placeholder="C:/Users/you/some-project" required style="flex:1">
-          <button type="button" id="browseBtn" onclick="pickDirectory()">Browse&hellip;</button>
+          <input type="text" id="f-dir" placeholder="absolute path, e.g. C:/Users/you/project or /Users/you/project" required style="flex:1">
+          <button type="button" id="browseBtn" onclick="pickDirectory('f-dir')">Browse&hellip;</button>
         </div>
+        <div id="dirBrowser-f-dir" class="dir-browser">
+          <div class="db-head"><span class="db-path"></span><button type="button" class="primary" onclick="useDirBrowserPath('f-dir')">Use this</button></div>
+          <div class="db-list"></div>
+        </div>
+      </div>
+      <div class="frow"><label>Engine</label>
+        <select id="f-engine" onchange="syncAddFormModels()">
+          <option value="claude" selected>Claude Code (Anthropic subscription)</option>
+          <option value="codex">Codex CLI (ChatGPT subscription)</option>
+        </select>
+        <div class="contain-warn" id="codexNote" style="display:none">Codex cycles have no guard hook: STOP is enforced by the daemon's kill poll only, and edits are confined by Codex's own workspace sandbox. There is no usage meter for a ChatGPT plan; a Codex project runs until a cycle hits the limit, then sleeps an hour.</div>
       </div>
       <div class="frow"><label>Mission prompt</label>
         <textarea id="f-prompt" placeholder="What should cycles work toward? This is the Prime Directive text every cycle reads." required></textarea>
       </div>
       <div class="fgrid">
         <div class="frow"><label>Priority</label><input type="number" id="f-priority" value="2" min="1"></div>
-        <div class="frow"><label>Model</label><select id="f-model"><option>claude-opus-5</option><option>claude-fable-5</option><option>claude-opus-4-8</option><option selected>claude-sonnet-5</option><option>claude-haiku-4-5</option></select></div>
+        <div class="frow"><label>Model</label><select id="f-model" onchange="onModelPick(this, 'f-engine')"><option>claude-opus-5</option><option>claude-fable-5-1</option><option selected>claude-sonnet-5</option><option>claude-haiku-4-5</option></select></div>
         <div class="frow"><label>Effort</label><select id="f-effort"><option value="">default</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
-        <div class="frow"><label>Worker model</label><select id="f-worker"><option value="">none (not orchestrated)</option><option>claude-opus-5</option><option>claude-fable-5</option><option>claude-opus-4-8</option><option>claude-sonnet-5</option><option>claude-haiku-4-5</option></select></div>
+        <div class="frow"><label>Worker model</label><select id="f-worker" onchange="customModelHook(this)"><option value="">none (not orchestrated)</option><option>claude-opus-5</option><option>claude-fable-5-1</option><option>claude-sonnet-5</option><option>claude-haiku-4-5</option></select></div>
         <div class="frow"><label>Worker effort</label><select id="f-worker-effort"><option value="">inherit</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
         <div class="frow"><label>Max cycle (min)</label><input type="number" id="f-maxCycle" value="120"></div>
         <div class="frow"><label>Critic ratio</label><input type="number" id="f-critic" value="5" min="0" title="every Nth cycle is a critic; 0 = off"></div>
         <div class="frow"><label>Review gate</label><input type="number" id="f-gate" value="0" min="0" title="pause for review after N cycles; 0 = off"></div>
         <div class="frow"><label>Containment</label><select id="f-contain" onchange="document.getElementById('cwarn').style.display=this.value==='off'?'block':'none'"><option>standard</option><option>off</option></select></div>
+        <div class="frow"><label>Image model</label><select id="f-image" onchange="customModelHook(this)"><option value="">default (Settings)</option></select></div>
       </div>
       <div class="contain-warn" id="cwarn">Containment off: no guard hook, no deny rules. API key stripping still applies.</div>
       <div class="m-actions"><button type="button" class="ghost" onclick="closeModal()">Cancel</button><button type="submit" class="primary">Add &amp; start</button></div>
@@ -364,14 +397,88 @@
     <div id="avError" style="display:none"></div>
     <form id="avForm" onsubmit="submitAddVariant(event)">
       <div class="frow"><label>Label</label><input type="text" id="av-label" placeholder="e.g. new-model"></div>
-      <div class="frow"><label>Model</label><input type="text" id="av-model" placeholder="inherit experiment default"></div>
-      <div class="frow"><label>Worker model</label><input type="text" id="av-worker" placeholder="inherit"></div>
+      <div class="frow"><label>Model</label><select id="av-model" onchange="customModelHook(this)"></select></div>
+      <div class="frow"><label>Worker model</label><select id="av-worker" onchange="customModelHook(this)"></select></div>
+      <div class="frow"><label>Image model</label><select id="av-image" onchange="customModelHook(this)"></select></div>
       <div class="frow"><label>Effort</label>
         <select id="av-effort"><option value="">inherit</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select>
       </div>
       <div class="frow"><label>Prompt suffix</label><input type="text" id="av-suffix" placeholder="optional"></div>
       <div class="m-actions"><button type="button" class="ghost" onclick="closeAddVariantModal()">Cancel</button><button type="submit" class="primary">Add &amp; start</button></div>
     </form>
+  </div>
+</div>
+
+<div id="settingsBg" onclick="if(event.target===this)closeSettings()">
+  <div class="modal settings-modal">
+    <h3>Settings</h3>
+
+    <div class="settings-section">
+      <h4>Engines</h4>
+      <p class="hint">Each engine is a CLI on this machine, signed in to its own subscription account. Autopilot never sees the credentials: it only runs the CLI. Sign in opens the CLI's own browser flow.</p>
+      <div id="engineRows"></div>
+      <div style="margin-top:8px; display:flex; gap:8px; align-items:center">
+        <button onclick="refreshEngines()">Re-check</button>
+        <span class="hint" id="engineHint" style="font-size:12px; color:var(--text-secondary)"></span>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h4>Provider API keys</h4>
+      <p class="hint">For API-billed models. Stored in <code>~/.autopilot/keys.json</code> on this machine only, never in the registry, a log, or the UI. Cycles receive them as <code>OPENAI_API_KEY</code> / <code>STABILITY_API_KEY</code> so a project's own code and the image helper can use them. A signed-in Codex keeps using its subscription; the OpenAI key is its fallback when it is not signed in. Claude cycles always stay on the subscription. Detect looks in this machine's environment and nearby <code>.env</code> files and fills empty slots.</p>
+      <div id="keyRows"></div>
+      <div style="margin-top:8px; display:flex; gap:8px; align-items:center">
+        <button onclick="detectKeys()">Detect on this machine</button>
+        <span id="keyHint" style="font-size:12px; color:var(--text-secondary)"></span>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h4>Image generation</h4>
+      <p class="hint">Default model for the image helper (<code>node image.js "prompt" --out file.png</code>), used by any project that does not pick its own. Cycles only hear about the helper when a key above is set.</p>
+      <div style="display:flex; gap:8px">
+        <select id="s-image" onchange="customModelHook(this)" style="flex:1"></select>
+        <button type="button" class="primary" onclick="saveImageModel()">Save</button>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h4>Projects folder</h4>
+      <p class="hint">Where the Browse button starts when you add a project. Project directories are always local paths on the machine running the daemon.</p>
+      <div style="display:flex; gap:8px">
+        <input type="text" id="s-root" placeholder="(home directory)" style="flex:1; font-family:var(--font-mono); font-size:12px">
+        <button type="button" onclick="pickDirectory('s-root')">Browse&hellip;</button>
+        <button type="button" class="primary" onclick="saveProjectsRoot()">Save</button>
+      </div>
+      <div id="dirBrowser-s-root" class="dir-browser">
+        <div class="db-head"><span class="db-path"></span><button type="button" class="primary" onclick="useDirBrowserPath('s-root')">Use this</button></div>
+        <div class="db-list"></div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h4>Notifications</h4>
+      <p class="hint">Optional webhook: Autopilot POSTs <code>{title, body, t}</code> JSON when it resumes after a usage window resets. Desktop toasts are always on.</p>
+      <div style="display:flex; gap:8px">
+        <input type="text" id="s-webhook" placeholder="https://..." style="flex:1; font-family:var(--font-mono); font-size:12px">
+        <button type="button" class="primary" onclick="saveWebhook()">Save</button>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h4>Sharing this</h4>
+      <p class="hint">Autopilot is local-first. Nothing is shared between machines: the daemon, the UI on port <span id="s-port">4680</span>, the registry in <code>~/.autopilot/</code> and every project directory live on the machine running it. To set up your own copy:</p>
+      <ol class="hint" style="padding-left: 20px; margin: 0; line-height: 1.7">
+        <li>Install Node 22+ and git.</li>
+        <li>Install the engine CLI you want: <code>npm i -g @anthropic-ai/claude-code</code> or <code>npm i -g @openai/codex</code>.</li>
+        <li>Clone the repo and run <code>node autopilot.js</code>. The daemon starts and this page opens.</li>
+        <li>Open Settings and click Sign in next to your engine. It uses your own subscription account.</li>
+        <li>Optionally set a Projects folder above.</li>
+        <li>Click + Add project, choose a directory and write the mission prompt.</li>
+      </ol>
+    </div>
+
+    <div class="m-actions"><button type="button" class="ghost" onclick="closeSettings()">Close</button></div>
   </div>
 </div>
 
@@ -388,18 +495,19 @@
       </div>
       <div class="fgrid">
         <div class="frow"><label>Cycle cap</label><input type="number" id="ex-cap" value="5" min="1"></div>
-        <div class="frow"><label>Default model</label><input type="text" id="ex-def-model" placeholder="optional"></div>
-        <div class="frow"><label>Default worker model</label><input type="text" id="ex-def-worker" placeholder="optional"></div>
+        <div class="frow"><label>Default model</label><select id="ex-def-model" onchange="customModelHook(this)"></select></div>
+        <div class="frow"><label>Default worker model</label><select id="ex-def-worker" onchange="customModelHook(this)"></select></div>
         <div class="frow"><label>Default effort</label>
           <select id="ex-def-effort"><option value="">default</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select>
         </div>
         <div class="frow"><label>Default verify command</label><input type="text" id="ex-def-verify" placeholder="optional"></div>
+        <div class="frow"><label>Default image model</label><select id="ex-def-image" onchange="customModelHook(this)"></select></div>
         <div class="frow"><label>Port base</label><input type="number" id="ex-portbase" min="1024" max="64000" placeholder="empty = static site" onchange="onExpPortBaseChange()" title="Server experiment: variant i gets port base+i as a local Docker container. Check the port range is free first."></div>
       </div>
       <div class="frow">
         <label>Variants</label>
         <table id="ex-variants-table">
-          <tr><th>label</th><th>model</th><th>worker model</th><th>effort</th><th>prompt suffix</th><th></th></tr>
+          <tr><th>label</th><th>model</th><th>worker model</th><th>image model</th><th>effort</th><th>prompt suffix</th><th></th></tr>
           <tbody id="ex-variants-body"></tbody>
         </table>
         <div style="margin-top:8px"><button type="button" onclick="addExpVariantRow()">+ Add variant</button></div>
@@ -646,6 +754,11 @@ function renderHeader() {
   const pauseBtn = document.getElementById('pauseBtn');
   pauseBtn.textContent = s.daemon.paused ? 'Resume all' : 'Pause all';
   pauseBtn.classList.toggle('paused', s.daemon.paused);
+
+  // Browse works everywhere: the native shell dialog on Windows, the in-page
+  // directory browser elsewhere (see pickDirectory).
+
+  if (document.getElementById('settingsBg').classList.contains('on')) renderSettings();
 
   document.getElementById('ceil').value = s.settings.ceilingPct;
   document.getElementById('ceilVal').textContent = s.settings.ceilingPct + '%';
@@ -1061,8 +1174,100 @@ function renderTailLine(raw) {
   return `<div class="${cls}"><span class="t">${escapeHtml(timeShort(iso))}</span> ${label}${escapeHtml(msg)}</div>`;
 }
 
-const MODEL_OPTS = ['claude-opus-5', 'claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'];
+// Fallbacks only: the daemon ships the real catalog in status.models
+// (src/engines.js MODEL_CATALOG), so every dropdown reads one list.
+const MODEL_OPTS = ['claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5'];
+const FALLBACK_CATALOG = {
+  text: { anthropic: MODEL_OPTS, openai: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] },
+  images: { openai: ['gpt-image-2.5-sunburst', 'gpt-image-2.5-flare'], stability: ['stable-image-ultra', 'stable-image-core', 'sd3.5-large', 'sd3.5-large-turbo', 'sd3.5-medium'] },
+};
+const CUSTOM_MODEL = '__custom__';
 const EFFORT_OPTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function catalog() { return (status && status.models) || FALLBACK_CATALOG; }
+
+// Every text-model dropdown offers the same grouped list, whatever the
+// engine: the engine follows the model (a GPT id runs on Codex, a claude id
+// on Claude Code - src/engines.js engineForModel, mirrored in engineForModelUI).
+function modelOptsFor(engine) {
+  const c = catalog().text;
+  const lm = status && status.localModel;
+  const local = lm && lm.available ? [{ value: lm.id, label: lm.label, local: true, group: 'Local' }] : [];
+  return local
+    .concat(c.anthropic.map(v => ({ value: v, label: v, group: 'Anthropic (Claude Code)' })))
+    .concat(c.openai.map(v => ({ value: v, label: v, group: 'OpenAI (Codex)' })))
+    .concat([{ value: 'default', label: 'default (Codex config)', group: 'OpenAI (Codex)' }])
+    .concat([{ value: CUSTOM_MODEL, label: 'custom model id...' }]);
+}
+
+function imageModelOpts() {
+  const c = catalog().images;
+  return c.openai.map(v => ({ value: v, label: v, group: 'OpenAI' }))
+    .concat(c.stability.map(v => ({ value: v, label: v, group: 'Stability AI' })))
+    .concat([{ value: CUSTOM_MODEL, label: 'custom model id...' }]);
+}
+
+function engineForModelUI(model) {
+  if (/^claude-/i.test(model)) return 'claude';
+  if (/^(gpt-|o\d|codex)/i.test(model) || model === 'default') return 'codex';
+  return null;
+}
+
+// After a model pick: resolve "custom", then move the engine select (if the
+// form has one) to the engine that model runs on.
+function onModelPick(sel, engineSelId) {
+  customModelHook(sel);
+  const eng = engineForModelUI(sel.value);
+  const engineSel = engineSelId && document.getElementById(engineSelId);
+  if (eng && engineSel && engineSel.value !== eng) {
+    engineSel.value = eng;
+    if (engineSelId === 'f-engine') document.getElementById('codexNote').style.display = eng === 'codex' ? 'block' : 'none';
+  }
+}
+
+// Selecting "custom" on any model select prompts for an id and inserts it
+// as a real option, so the rest of the form never sees the sentinel.
+function customModelHook(sel) {
+  if (sel.value !== CUSTOM_MODEL) return;
+  const id = (prompt('Model id (letters, digits, dots and dashes):') || '').trim();
+  const prev = sel.dataset.prev || '';
+  if (!id || !/^[a-z0-9][a-z0-9.\-]{0,63}$/i.test(id)) { sel.value = prev; return; }
+  const opt = document.createElement('option');
+  opt.value = id; opt.textContent = id;
+  sel.insertBefore(opt, sel.firstChild);
+  sel.value = id;
+  sel.dataset.prev = id;
+}
+
+function fillModelSelect(sel, engine, current, blankLabel) {
+  sel.innerHTML = optionList(modelOptsFor(engine), current, blankLabel);
+  sel.dataset.prev = sel.value;
+}
+
+// Add form: an engine change moves the model to that engine's default when
+// the current pick belongs to the other engine.
+function syncAddFormModels() {
+  const engine = document.getElementById('f-engine').value;
+  const modelSel = document.getElementById('f-model');
+  const cur = modelSel.value;
+  const keep = cur && engineForModelUI(cur) === engine;
+  fillModelSelect(modelSel, engine, keep ? cur : (engine === 'codex' ? 'default' : 'claude-sonnet-5'), null);
+  const workerSel = document.getElementById('f-worker');
+  fillModelSelect(workerSel, engine, workerSel.value || '', 'none (not orchestrated)');
+  const imgSel = document.getElementById('f-image');
+  imgSel.innerHTML = optionList(imageModelOpts(), imgSel.value || '', 'default (Settings)');
+  document.getElementById('codexNote').style.display = engine === 'codex' ? 'block' : 'none';
+}
+
+// Config card: same, for an existing project.
+function syncConfigModels() {
+  const engine = document.getElementById('cfg-engine').value;
+  const p = status && status.projects.find(x => x.id === selectedId);
+  const modelSel = document.getElementById('cfg-model');
+  const cur = modelSel.value || (p && p.model) || '';
+  const keep = cur && engineForModelUI(cur) === engine;
+  fillModelSelect(modelSel, engine, keep ? cur : (engine === 'codex' ? 'default' : 'claude-sonnet-5'), null);
+}
 
 // Accepts plain strings, or {value,label} when the option needs to display
 // something other than the raw model id (the local model shows a friendly
@@ -1074,11 +1279,21 @@ function optionList(values, current, blankLabel) {
     ? [{ value: current, label: current }].concat(opts)
     : opts;
   let html = blankLabel != null ? `<option value=""${current ? '' : ' selected'}>${escapeHtml(blankLabel)}</option>` : '';
+  // Items may carry a `group` (provider name); consecutive items with the
+  // same group render inside one <optgroup>.
+  let openGroup = null;
   for (const o of list) {
+    const g = o.group || null;
+    if (g !== openGroup) {
+      if (openGroup) html += '</optgroup>';
+      if (g) html += `<optgroup label="${escapeHtml(g)}">`;
+      openGroup = g;
+    }
     // data-local marks the locally-served entry so syncLocalModelOptions() can
     // find and reconcile it later without re-rendering the whole card.
     html += `<option value="${escapeHtml(o.value)}"${o.local ? ' data-local="1"' : ''}${o.value === current ? ' selected' : ''}>${escapeHtml(o.label)}</option>`;
   }
+  if (openGroup) html += '</optgroup>';
   return html;
 }
 
@@ -1102,9 +1317,11 @@ function renderConfigCard(p) {
     <div class="card">
       <h3>Config <span class="sub">applies on the next cycle</span></h3>
       <div class="cfg-grid">
-        <label>Model (orchestrator)<select id="cfg-model">${optionList(modelOptsWithLocal(), p.model, null)}</select></label>
+        <label>Engine<select id="cfg-engine" onchange="syncConfigModels()">${optionList([{ value: 'claude', label: 'Claude Code' }, { value: 'codex', label: 'Codex CLI' }], p.engine || 'claude', null)}</select></label>
+        <label>Model (orchestrator)<select id="cfg-model" onchange="onModelPick(this, 'cfg-engine')">${optionList(modelOptsFor(p.engine || 'claude'), p.model, null)}</select></label>
         <label>Effort<select id="cfg-effort">${optionList(EFFORT_OPTS, p.effort || '', 'default')}</select></label>
-        <label>Worker model<select id="cfg-worker">${optionList(modelOptsWithLocal(), p.workerModel || '', 'none (not orchestrated)')}</select></label>
+        <label>Worker model<select id="cfg-worker" onchange="customModelHook(this)">${optionList(modelOptsFor(p.engine || 'claude'), p.workerModel || '', 'none (not orchestrated)')}</select></label>
+        <label>Image model<select id="cfg-image" onchange="customModelHook(this)">${optionList(imageModelOpts(), p.imageModel || '', 'default (Settings)')}</select></label>
         <label>Worker effort<select id="cfg-worker-effort">${optionList(EFFORT_OPTS, p.workerEffort || '', 'inherit')}</select></label>
         <label>Critic ratio<input type="number" id="cfg-critic" min="0" value="${safeNum(p.criticRatio, 0)}"></label>
         <label>Review gate<input type="number" id="cfg-gate" min="0" value="${safeNum(p.reviewGateCycles, 0)}"></label>
@@ -1120,10 +1337,12 @@ async function saveConfig() {
   if (!selectedId) return;
   const g = (id) => document.getElementById(id);
   const patch = {
+    engine: g('cfg-engine').value,
     model: g('cfg-model').value,
     effort: g('cfg-effort').value,          // '' => revert to CLI default
     workerModel: g('cfg-worker').value,      // '' => turn orchestration off
     workerEffort: g('cfg-worker-effort').value, // '' => inherit orchestrator effort
+    imageModel: g('cfg-image').value,          // '' => the Settings default
     criticRatio: Number(g('cfg-critic').value),
     reviewGateCycles: Number(g('cfg-gate').value),
   };
@@ -1182,8 +1401,10 @@ function renderDetailShell(loading, errorMsg) {
       <span class="d-name">${escapeHtml(p.id)}</span>
       <span class="d-dir">${escapeHtml(p.dir)}</span>
       <span class="d-meta">
+        ${(p.engine || 'claude') !== 'claude' ? `<span class="tag">${escapeHtml(p.engine)}</span>` : ''}
         <span class="tag">${escapeHtml(p.model)}${p.effort ? ' &middot; ' + escapeHtml(p.effort) : ''}</span>
         ${p.workerModel ? `<span class="tag">worker: ${escapeHtml(p.workerModel)}${p.workerEffort ? ' &middot; ' + escapeHtml(p.workerEffort) : ''}</span>` : ''}
+        ${p.imageModel ? `<span class="tag">images: ${escapeHtml(p.imageModel)}</span>` : ''}
         <span class="tag">critic 1:${safeNum(p.criticRatio, 0) || 'off'}</span>
         <span class="tag">gate ${safeNum(p.reviewGateCycles, 0) || 'off'}</span>
         <span class="tag" ${p.containment === 'off' ? 'style="color:var(--accent);border-color:rgba(224,53,53,.35)"' : ''}>containment ${escapeHtml(p.containment)}</span>
@@ -1329,8 +1550,8 @@ function updateDetailHead() {
 /* ============================================================
    Add-project modal
    ============================================================ */
-function openModal() { document.getElementById('modalBg').classList.add('on'); }
-function closeModal() { document.getElementById('modalBg').classList.remove('on'); document.getElementById('addForm').reset(); document.getElementById('cwarn').style.display = 'none'; }
+function openModal() { document.getElementById('modalBg').classList.add('on'); syncAddFormModels(); }
+function closeModal() { document.getElementById('modalBg').classList.remove('on'); document.getElementById('addForm').reset(); document.getElementById('cwarn').style.display = 'none'; document.getElementById('dirBrowser-f-dir').style.display = 'none'; syncAddFormModels(); }
 
 async function submitAdd(ev) {
   ev.preventDefault();
@@ -1338,6 +1559,7 @@ async function submitAdd(ev) {
     dir: document.getElementById('f-dir').value.trim(),
     prompt: document.getElementById('f-prompt').value.trim(),
     priority: +document.getElementById('f-priority').value || 1,
+    engine: document.getElementById('f-engine').value,
     model: document.getElementById('f-model').value,
     effort: document.getElementById('f-effort').value,
     workerModel: document.getElementById('f-worker').value,
@@ -1345,7 +1567,8 @@ async function submitAdd(ev) {
     maxCycleMinutes: +document.getElementById('f-maxCycle').value || 120,
     criticRatio: +document.getElementById('f-critic').value || 0,
     reviewGateCycles: +document.getElementById('f-gate').value || 0,
-    containment: document.getElementById('f-contain').value
+    containment: document.getElementById('f-contain').value,
+    imageModel: document.getElementById('f-image').value
   };
   if (!body.dir || !body.prompt) { alert('Directory and mission prompt are required.'); return; }
   try {
@@ -1548,24 +1771,29 @@ function renderExperiments() {
     : '<div class="empty-note">(no experiments yet)</div>';
 }
 
-/* ---- Native folder picker (add-project modal) ---- */
-// Opens the real Windows folder dialog via the daemon (which runs in the
-// user's desktop session). The button disables while the dialog is up.
-async function pickDirectory() {
-  const btn = document.getElementById('browseBtn');
+/* ---- Folder picking (add-project modal, settings) ---- */
+// On Windows the daemon opens the real shell folder dialog (it runs in the
+// user's desktop session, so it can). Everywhere else, and whenever that
+// endpoint is unavailable, an in-page browser lists directories via
+// GET /api/fs/dirs. Both fill the target text input, which stays editable.
+async function pickDirectory(targetId) {
+  const platform = status && status.daemon && status.daemon.platform;
+  if (platform !== 'win32') { toggleDirBrowser(targetId); return; }
+  const btn = event && event.currentTarget ? event.currentTarget : document.getElementById('browseBtn');
   btn.disabled = true;
   btn.textContent = 'picking…';
   try {
     if (isMock) { console.log('[mock] pick directory (no-op)'); return; }
     const res = await fetch('/api/fs/pick', { method: 'POST' });
     if (!res.ok) {
+      if (res.status === 501) { toggleDirBrowser(targetId); return; }
       let msg = 'picker failed: ' + res.status;
       try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (e) {}
       alert(msg);
       return;
     }
     const data = await res.json();
-    if (data && data.path) document.getElementById('f-dir').value = data.path;
+    if (data && data.path) document.getElementById(targetId).value = data.path;
   } catch (e) {
     alert('picker failed: ' + e.message);
   } finally {
@@ -1574,12 +1802,227 @@ async function pickDirectory() {
   }
 }
 
+const dirBrowserState = {}; // targetId -> {path, parent}
+
+function toggleDirBrowser(targetId) {
+  const el = document.getElementById('dirBrowser-' + targetId);
+  const open = el.style.display === 'block';
+  el.style.display = open ? 'none' : 'block';
+  if (!open) loadDirBrowser(targetId, document.getElementById(targetId).value.trim() || null);
+}
+
+async function loadDirBrowser(targetId, p) {
+  const el = document.getElementById('dirBrowser-' + targetId);
+  try {
+    if (isMock) return;
+    const res = await fetch('/api/fs/dirs' + (p ? '?path=' + encodeURIComponent(p) : ''));
+    if (!res.ok) {
+      // A half-typed or bogus path in the input: fall back to the root.
+      if (p) return loadDirBrowser(targetId, null);
+      return;
+    }
+    const data = await res.json();
+    dirBrowserState[targetId] = { path: data.path, parent: data.parent };
+    el.querySelector('.db-path').textContent = data.path;
+    const list = el.querySelector('.db-list');
+    list.innerHTML = '';
+    const mkRow = (label, target) => {
+      const row = document.createElement('div');
+      row.className = 'db-row';
+      row.textContent = label;
+      row.onclick = () => loadDirBrowser(targetId, target);
+      list.appendChild(row);
+    };
+    if (data.parent) mkRow('..', data.parent);
+    for (const name of data.dirs) mkRow(name + '/', data.path.replace(/\/$/, '') + '/' + name);
+    if (!data.dirs.length) {
+      const empty = document.createElement('div');
+      empty.className = 'db-empty';
+      empty.textContent = '(no subdirectories)';
+      list.appendChild(empty);
+    }
+  } catch (e) {
+    console.error('dir browse failed', e);
+  }
+}
+
+function useDirBrowserPath(targetId) {
+  const st = dirBrowserState[targetId];
+  if (st && st.path) document.getElementById(targetId).value = st.path;
+  document.getElementById('dirBrowser-' + targetId).style.display = 'none';
+}
+
+/* ---- Settings page ---- */
+function openSettings() {
+  document.getElementById('settingsBg').classList.add('on');
+  const s = status && status.settings;
+  document.getElementById('s-root').value = (s && s.projectsRoot) || '';
+  document.getElementById('s-webhook').value = (s && s.webhook) || '';
+  document.getElementById('s-image').innerHTML = optionList(imageModelOpts(), (s && s.imageModel) || '', 'auto (first provider with a key)');
+  const port = location.port || '4680';
+  document.getElementById('s-port').textContent = port;
+  renderSettings();
+  if (!isMock) refreshEngines();
+}
+function closeSettings() {
+  document.getElementById('settingsBg').classList.remove('on');
+  document.getElementById('dirBrowser-s-root').style.display = 'none';
+}
+
+const KEY_PROVIDERS = [
+  { id: 'openai', label: 'OpenAI', hint: 'platform.openai.com/api-keys' },
+  { id: 'stability', label: 'Stability AI', hint: 'platform.stability.ai/account/keys' },
+];
+
+function renderKeyRows() {
+  const rows = document.getElementById('keyRows');
+  if (!rows) return;
+  const ks = (status && status.keys) || {};
+  // Preserve anything being typed: re-render only rows without a pending input.
+  rows.innerHTML = KEY_PROVIDERS.map(p => {
+    const k = ks[p.id] || { set: false, masked: null, source: null };
+    const src = k.source ? (k.source.startsWith('detected:') ? 'detected from ' + k.source.slice(9).replace(/^env:/, '$') : 'entered here') : '';
+    const state = k.set ? `${k.masked} · ${src}` : `not set · get one at ${p.hint}`;
+    return `<div class="engine-row">
+      <span class="dot ${k.set ? '' : 'off'}"></span>
+      <span class="e-name">${escapeHtml(p.label)}</span>
+      <span class="e-detail">${escapeHtml(state)}</span>
+      <input type="password" id="key-${p.id}" placeholder="${k.set ? 'replace...' : 'paste key'}" autocomplete="off" style="width:180px; font-family:var(--font-mono); font-size:12px">
+      <button onclick="saveKey('${p.id}')">Save</button>
+      ${k.set ? `<button onclick="clearKey('${p.id}')">Clear</button>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function saveKey(provider) {
+  const input = document.getElementById('key-' + provider);
+  const v = (input.value || '').trim();
+  if (!v) return;
+  const hint = document.getElementById('keyHint');
+  try {
+    if (isMock) { console.log('[mock] save key (no-op)', provider); return; }
+    const res = await fetch('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [provider]: v }) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    input.value = '';
+    const data = await res.json();
+    status.keys = data.keys;
+    renderKeyRows();
+    hint.textContent = provider + ' key saved.';
+  } catch (e) {
+    hint.textContent = 'save failed: ' + e.message;
+  }
+}
+
+async function clearKey(provider) {
+  if (!confirm('Remove the stored ' + provider + ' key?')) return;
+  try {
+    if (isMock) return;
+    const res = await fetch('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [provider]: '' }) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    status.keys = data.keys;
+    renderKeyRows();
+  } catch (e) {
+    alert('clear failed: ' + e.message);
+  }
+}
+
+async function detectKeys() {
+  const hint = document.getElementById('keyHint');
+  hint.textContent = 'looking...';
+  try {
+    if (isMock) { hint.textContent = ''; return; }
+    const res = await fetch('/api/keys/detect', { method: 'POST' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    status.keys = data.keys;
+    renderKeyRows();
+    hint.textContent = data.filled && data.filled.length ? 'found: ' + data.filled.join(', ') : 'nothing new found (checked env vars and .env files up to two folders deep)';
+  } catch (e) {
+    hint.textContent = 'detect failed: ' + e.message;
+  }
+}
+
+async function saveImageModel() {
+  const v = document.getElementById('s-image').value;
+  await doAction('/api/settings', { imageModel: v || '' });
+}
+
+function renderSettings() {
+  renderKeyRows();
+  const rows = document.getElementById('engineRows');
+  const engines = (status && status.engines) || {};
+  const order = ['claude', 'codex'];
+  rows.innerHTML = order.map(id => {
+    const e = engines[id] || { id, label: id, installed: null, loggedIn: null, detail: 'checking...' };
+    const label = e.label || id;
+    const cls = e.installed === null ? 'off' : !e.installed ? 'off' : e.loggedIn ? '' : 'warn';
+    const installCmd = id === 'codex' ? 'npm i -g @openai/codex' : 'npm i -g @anthropic-ai/claude-code';
+    const detail = e.installed === false ? `not installed · ${installCmd}`
+      : e.installed === null ? 'checking...'
+      : `${e.version ? 'v' + e.version + ' · ' : ''}${e.detail || ''}`;
+    const canLogin = e.installed === true && !e.loggedIn;
+    return `<div class="engine-row">
+      <span class="dot ${cls}"></span>
+      <span class="e-name">${escapeHtml(label)}</span>
+      <span class="e-detail">${escapeHtml(detail)}</span>
+      ${canLogin ? `<button onclick="engineLogin('${id}')">Sign in</button>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function refreshEngines() {
+  const hint = document.getElementById('engineHint');
+  hint.textContent = 'checking...';
+  try {
+    if (isMock) { hint.textContent = ''; return; }
+    const res = await fetch('/api/engines/refresh', { method: 'POST' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    applyStatus(await res.json());
+    hint.textContent = '';
+  } catch (e) {
+    hint.textContent = 'check failed: ' + e.message;
+  }
+}
+
+async function engineLogin(id) {
+  const hint = document.getElementById('engineHint');
+  try {
+    if (isMock) { console.log('[mock] engine login (no-op)', id); return; }
+    const res = await fetch('/api/engines/' + id + '/login', { method: 'POST' });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert('Sign-in could not start: ' + (body.error || res.status));
+      return;
+    }
+    applyStatus(await res.json());
+    hint.textContent = 'A browser window should open for ' + id + ' sign-in. Click Re-check when it finishes.';
+  } catch (e) {
+    alert('Sign-in could not start: ' + e.message);
+  }
+}
+
+async function saveProjectsRoot() {
+  const v = document.getElementById('s-root').value.trim();
+  await doAction('/api/settings', { projectsRoot: v });
+  const saved = status && status.settings && status.settings.projectsRoot;
+  if (v && saved !== v && saved !== v.replace(/\\/g, '/')) alert('Not saved: the folder must be an existing absolute path on the daemon machine.');
+}
+
+async function saveWebhook() {
+  const v = document.getElementById('s-webhook').value.trim();
+  await doAction('/api/settings', { webhook: v || null });
+}
+
 /* ---- Add-variant modal ---- */
 let addVarExpId = null;
 
 function openAddVariantModal(expId) {
   addVarExpId = expId;
   document.getElementById('avForm').reset();
+  fillModelSelect(document.getElementById('av-model'), 'claude', '', 'inherit experiment default');
+  fillModelSelect(document.getElementById('av-worker'), 'claude', '', 'inherit');
+  document.getElementById('av-image').innerHTML = optionList(imageModelOpts(), '', 'inherit');
   document.getElementById('av-exp').textContent = expId;
   const err = document.getElementById('avError');
   err.style.display = 'none';
@@ -1599,9 +2042,11 @@ async function submitAddVariant(ev) {
   const overrides = {};
   const model = document.getElementById('av-model').value.trim();
   const worker = document.getElementById('av-worker').value.trim();
+  const imageModel = document.getElementById('av-image').value.trim();
   const effort = document.getElementById('av-effort').value;
   if (model) overrides.model = model;
   if (worker) overrides.workerModel = worker;
+  if (imageModel) overrides.imageModel = imageModel;
   if (effort) overrides.effort = effort;
   const body = { overrides };
   const label = document.getElementById('av-label').value.trim();
@@ -1642,8 +2087,9 @@ function addExpVariantRow(data) {
   tr.id = rowId;
   tr.innerHTML = `
     <td><input type="text" class="exv-label" value="${escapeHtml(d.label || '')}" placeholder="variant-${expVariantSeq}"></td>
-    <td><input type="text" class="exv-model" value="${escapeHtml(d.model || '')}" placeholder="inherit"></td>
-    <td><input type="text" class="exv-worker" value="${escapeHtml(d.workerModel || '')}" placeholder="inherit"></td>
+    <td><select class="exv-model" onchange="customModelHook(this)">${optionList(modelOptsFor('claude'), d.model || '', 'inherit')}</select></td>
+    <td><select class="exv-worker" onchange="customModelHook(this)">${optionList(modelOptsFor('claude'), d.workerModel || '', 'inherit')}</select></td>
+    <td><select class="exv-image" onchange="customModelHook(this)">${optionList(imageModelOpts(), d.imageModel || '', 'inherit')}</select></td>
     <td><select class="exv-effort">
           <option value="">inherit</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option>
         </select></td>
@@ -1662,6 +2108,7 @@ function dupExpVariantRow(rowId) {
     label: tr.querySelector('.exv-label').value,
     model: tr.querySelector('.exv-model').value,
     workerModel: tr.querySelector('.exv-worker').value,
+    imageModel: tr.querySelector('.exv-image').value,
     effort: tr.querySelector('.exv-effort').value,
     promptSuffix: tr.querySelector('.exv-suffix').value,
   });
@@ -1676,6 +2123,12 @@ function removeExpVariantRow(rowId) {
 
 function openExpModal() {
   document.getElementById('expForm').reset();
+  // Model pickers: the default model is what every variant runs unless it
+  // overrides, so it is pre-filled with the project default rather than
+  // left blank; the worker default is optional (blank = not orchestrated).
+  fillModelSelect(document.getElementById('ex-def-model'), 'claude', 'claude-sonnet-5', null);
+  fillModelSelect(document.getElementById('ex-def-worker'), 'claude', '', 'none (not orchestrated)');
+  document.getElementById('ex-def-image').innerHTML = optionList(imageModelOpts(), '', 'default (Settings)');
   document.getElementById('ex-prompt').value = DEFAULT_MISSION_PROMPT;
   document.getElementById('ex-cap').value = 5;
   document.getElementById('ex-variants-body').innerHTML = '';
@@ -1701,21 +2154,25 @@ async function submitExp(ev) {
   const dWorker = document.getElementById('ex-def-worker').value.trim();
   const dEffort = document.getElementById('ex-def-effort').value;
   const dVerify = document.getElementById('ex-def-verify').value.trim();
+  const dImage = document.getElementById('ex-def-image').value.trim();
   if (dModel) defaults.model = dModel;
   if (dWorker) defaults.workerModel = dWorker;
   if (dEffort) defaults.effort = dEffort;
   if (dVerify) defaults.verifyCmd = dVerify;
+  if (dImage) defaults.imageModel = dImage;
 
   const rows = Array.from(document.querySelectorAll('#ex-variants-body tr'));
   const variants = rows.map(tr => {
     const label = tr.querySelector('.exv-label').value.trim();
     const model = tr.querySelector('.exv-model').value.trim();
     const workerModel = tr.querySelector('.exv-worker').value.trim();
+    const imageModel = tr.querySelector('.exv-image').value.trim();
     const effort = tr.querySelector('.exv-effort').value;
     const promptSuffix = tr.querySelector('.exv-suffix').value.trim();
     const overrides = {};
     if (model) overrides.model = model;
     if (workerModel) overrides.workerModel = workerModel;
+    if (imageModel) overrides.imageModel = imageModel;
     if (effort) overrides.effort = effort;
     const v = { overrides };
     if (label) v.label = label;

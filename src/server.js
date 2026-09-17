@@ -402,6 +402,89 @@ function startServer({ scheduler, port }) {
       }
     }
 
+    // ---- directory browser (add-project modal, every platform) --------------
+    // Lists SUBDIRECTORIES only. The daemon already runs with the user's
+    // full filesystem rights and the server is loopback + Host-guarded, so
+    // this exposes nothing the UI's owner cannot already see; still, it
+    // never lists files, never reads contents, and never follows the request
+    // into a non-directory. Starts at settings.projectsRoot, else home.
+    if (method === 'GET' && pathname === '/api/fs/dirs') {
+      const os = require('os');
+      let start = os.homedir();
+      try {
+        const snap = scheduler.snapshot();
+        if (snap && snap.settings && snap.settings.projectsRoot) start = snap.settings.projectsRoot;
+      } catch (err) {
+        // best effort
+      }
+      const requested = query.get('path') || start;
+      let resolved;
+      try {
+        resolved = fs.realpathSync(path.resolve(requested));
+        if (!fs.statSync(resolved).isDirectory()) throw new Error('not a directory');
+      } catch (err) {
+        return sendJson(res, 400, { error: 'not a readable directory' });
+      }
+      let names = [];
+      try {
+        names = fs
+          .readdirSync(resolved, { withFileTypes: true })
+          .filter((d) => d.isDirectory() && !d.name.startsWith('.') && d.name !== 'node_modules')
+          .map((d) => d.name)
+          .sort((a, b) => a.localeCompare(b));
+      } catch (err) {
+        return sendJson(res, 400, { error: 'cannot list directory' });
+      }
+      const parent = path.dirname(resolved);
+      return sendJson(res, 200, {
+        path: resolved.replace(/\\/g, '/'),
+        parent: parent === resolved ? null : parent.replace(/\\/g, '/'),
+        dirs: names,
+      });
+    }
+
+    // ---- engines (settings page) --------------------------------------------
+    // Installed / version / signed-in state per engine CLI, and the two
+    // things the page can do about it: force a re-probe, and launch a
+    // sign-in (the CLI's own browser flow, from the daemon's desktop
+    // session - the daemon never sees or stores a credential).
+    if (method === 'GET' && pathname === '/api/engines') {
+      const snap = scheduler.snapshot();
+      return sendJson(res, 200, { engines: snap.engines || {} });
+    }
+    if (method === 'POST' && pathname === '/api/engines/refresh') {
+      if (typeof scheduler.refreshEngines === 'function') await scheduler.refreshEngines();
+      return sendJson(res, 200, scheduler.snapshot());
+    }
+    // ---- provider keys (settings page) --------------------------------------
+    // GET returns masked summaries only. POST {openai?, stability?} sets or
+    // clears ('' clears). POST /detect fills empty slots from the daemon's
+    // environment and nearby .env files. Keys live in ~/.autopilot/keys.json,
+    // never in the snapshot, the registry or a log line.
+    if (method === 'GET' && pathname === '/api/keys') {
+      const snap = scheduler.snapshot();
+      return sendJson(res, 200, { keys: snap.keys || {} });
+    }
+    if (method === 'POST' && pathname === '/api/keys') {
+      const body = await readJsonBody(req);
+      if (typeof scheduler.setProviderKeys !== 'function') return sendJson(res, 501, { error: 'not supported' });
+      const keys = scheduler.setProviderKeys(body);
+      return sendJson(res, 200, { keys });
+    }
+    if (method === 'POST' && pathname === '/api/keys/detect') {
+      if (typeof scheduler.detectProviderKeys !== 'function') return sendJson(res, 501, { error: 'not supported' });
+      return sendJson(res, 200, scheduler.detectProviderKeys());
+    }
+
+    let en = pathname.match(/^\/api\/engines\/(claude|codex)\/login$/);
+    if (en && method === 'POST') {
+      const r = typeof scheduler.startEngineLogin === 'function'
+        ? scheduler.startEngineLogin(en[1])
+        : { ok: false, error: 'not supported' };
+      if (!r.ok) return sendJson(res, 409, { error: r.error });
+      return sendJson(res, 200, scheduler.snapshot());
+    }
+
     // ---- experiments -------------------------------------------------------
     if (pathname === '/api/experiments') {
       if (method === 'GET') {

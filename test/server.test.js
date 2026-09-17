@@ -186,12 +186,12 @@ test('POST /api/projects/:id/config dispatches updateProject; unknown project ->
   const sched = makeFakeScheduler([{ id: 'proj1', dir: process.cwd() }]);
   await withServer(sched, async (port) => {
     const ok = await requestRaw(port, 'POST', '/api/projects/proj1/config', {
-      host: `127.0.0.1:${port}`, body: { model: 'claude-opus-4-8', effort: 'xhigh' }
+      host: `127.0.0.1:${port}`, body: { model: 'claude-opus-5', effort: 'xhigh' }
     });
     assert.equal(ok.status, 200);
     assert.ok(ok.body.daemon, 'returns the status snapshot');
     const call = sched.calls.find((c) => c[0] === 'updateProject');
-    assert.deepEqual(call, ['updateProject', 'proj1', { model: 'claude-opus-4-8', effort: 'xhigh' }]);
+    assert.deepEqual(call, ['updateProject', 'proj1', { model: 'claude-opus-5', effort: 'xhigh' }]);
 
     const bad = await requestRaw(port, 'POST', '/api/projects/nope/config', {
       host: `127.0.0.1:${port}`, body: { model: 'x' }
@@ -576,4 +576,82 @@ test('preview route: bare path redirects to trailing slash; trailing slash serve
   } finally {
     cleanupRealScheduler(ctx);
   }
+});
+
+// ---------------------------------------------------------------------------
+// settings page endpoints (2026-09-15): directory browser + engines
+// ---------------------------------------------------------------------------
+
+test('GET /api/fs/dirs lists subdirectories only, with a parent link, starting at projectsRoot', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autopilot-fsdirs-'));
+  fs.mkdirSync(path.join(root, 'beta'));
+  fs.mkdirSync(path.join(root, 'alpha'));
+  fs.mkdirSync(path.join(root, '.hidden'));
+  fs.mkdirSync(path.join(root, 'node_modules'));
+  fs.writeFileSync(path.join(root, 'file.txt'), 'x');
+  const sched = makeFakeScheduler([]);
+  sched._snapshot.settings.projectsRoot = root;
+  await withServer(sched, async (port) => {
+    const res = await requestRaw(port, 'GET', '/api/fs/dirs', { host: `127.0.0.1:${port}` });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.dirs, ['alpha', 'beta']);
+    assert.equal(res.body.path, fs.realpathSync(root).replace(/\\/g, '/'));
+    assert.ok(res.body.parent);
+
+    const sub = await requestRaw(port, 'GET', '/api/fs/dirs?path=' + encodeURIComponent(path.join(root, 'alpha')), { host: `127.0.0.1:${port}` });
+    assert.equal(sub.status, 200);
+    assert.deepEqual(sub.body.dirs, []);
+    assert.equal(sub.body.parent, fs.realpathSync(root).replace(/\\/g, '/'));
+
+    const bad = await requestRaw(port, 'GET', '/api/fs/dirs?path=' + encodeURIComponent(path.join(root, 'file.txt')), { host: `127.0.0.1:${port}` });
+    assert.equal(bad.status, 400);
+  });
+});
+
+test('engines endpoints: GET status, POST refresh, POST login (409 on refusal)', async () => {
+  const sched = makeFakeScheduler([]);
+  sched._snapshot.engines = { claude: { id: 'claude', installed: true, loggedIn: true }, codex: { id: 'codex', installed: false, loggedIn: false } };
+  let refreshed = 0;
+  sched.refreshEngines = async () => { refreshed += 1; };
+  sched.startEngineLogin = (engine) => (engine === 'codex' ? { ok: false, error: 'codex is not installed on this machine' } : { ok: true });
+  await withServer(sched, async (port) => {
+    const res = await requestRaw(port, 'GET', '/api/engines', { host: `127.0.0.1:${port}` });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.engines.codex.installed, false);
+
+    const r2 = await requestRaw(port, 'POST', '/api/engines/refresh', { host: `127.0.0.1:${port}`, body: {} });
+    assert.equal(r2.status, 200);
+    assert.equal(refreshed, 1);
+
+    const ok = await requestRaw(port, 'POST', '/api/engines/claude/login', { host: `127.0.0.1:${port}`, body: {} });
+    assert.equal(ok.status, 200);
+    const no = await requestRaw(port, 'POST', '/api/engines/codex/login', { host: `127.0.0.1:${port}`, body: {} });
+    assert.equal(no.status, 409);
+    assert.match(no.body.error, /not installed/);
+    const unknown = await requestRaw(port, 'POST', '/api/engines/gemini/login', { host: `127.0.0.1:${port}`, body: {} });
+    assert.equal(unknown.status, 404);
+  });
+});
+
+test('keys endpoints: GET is masked, POST sets/clears, POST /detect fills', async () => {
+  const sched = makeFakeScheduler([]);
+  sched._snapshot.keys = { openai: { set: true, masked: 'sk-pr...abc', source: 'settings' }, stability: { set: false, masked: null, source: null } };
+  const setCalls = [];
+  sched.setProviderKeys = (patch) => { setCalls.push(patch); return { openai: { set: false, masked: null, source: null }, stability: { set: true, masked: 'sk-st...xyz', source: 'settings' } }; };
+  sched.detectProviderKeys = () => ({ filled: ['openai'], keys: sched._snapshot.keys });
+  await withServer(sched, async (port) => {
+    const g = await requestRaw(port, 'GET', '/api/keys', { host: `127.0.0.1:${port}` });
+    assert.equal(g.status, 200);
+    assert.equal(g.body.keys.openai.masked, 'sk-pr...abc');
+    assert.doesNotMatch(g.raw, /sk-proj/);
+
+    const p = await requestRaw(port, 'POST', '/api/keys', { host: `127.0.0.1:${port}`, body: { openai: '', stability: 'sk-stab-full' } });
+    assert.equal(p.status, 200);
+    assert.deepEqual(setCalls, [{ openai: '', stability: 'sk-stab-full' }]);
+    assert.equal(p.body.keys.stability.set, true);
+
+    const d = await requestRaw(port, 'POST', '/api/keys/detect', { host: `127.0.0.1:${port}`, body: {} });
+    assert.equal(d.status, 200);
+    assert.deepEqual(d.body.filled, ['openai']);
+  });
 });

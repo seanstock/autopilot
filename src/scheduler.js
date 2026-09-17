@@ -35,6 +35,8 @@ const events = require('./events');
 const runner = require('./runner');
 const notifyModule = require('./notify');
 const localmodel = require('./localmodel');
+const enginesModule = require('./engines');
+const keysModule = require('./keys');
 
 const DAEMON_PID_FILENAME = 'daemon.pid';
 const VERSION = '0.2.0';
@@ -241,6 +243,9 @@ class Scheduler extends EventEmitter {
     // can offer it as a worker model only while it can actually be reached.
     // Injectable for tests; real callers get the shared cached probe.
     this.localModel = o.localModel || localmodel.shared();
+    // Installed/signed-in state of each engine CLI, for the settings page.
+    // Injectable for tests; real callers get the shared cached probe.
+    this.engines = o.engines || enginesModule.shared();
     this.tickMs = o.tickMs != null ? o.tickMs : 5000;
     // Test-only, documented extension (same pattern as budget.js's
     // minIntervalMs/backoffBaseMs): lets I1 tests observe the sticky-probe
@@ -461,59 +466,66 @@ class Scheduler extends EventEmitter {
       }
     }
 
+    // The Anthropic meter, grace and recovery bookkeeping below gate CLAUDE
+    // cycles only. A Codex project has no meter (src/budget.js engineOk):
+    // it keeps running while the Anthropic windows are exhausted, and
+    // sleeps on its own latch after a usage-limit exit of its own. With
+    // only Claude projects registered the tick is byte-identical to before.
+    let claudeOk = effectiveOk;
+
     if (!effectiveOk) {
       const reason = budgetResult.reason || 'outage';
       if (this._currentSleepReason !== reason) {
         const until = budgetResult.resetsAt || new Date(Date.now() + SLEEP_FALLBACK_MS).toISOString();
-        this._appendGlobalEvent('sleep', { reason, until });
+        this._appendGlobalEvent('sleep', { reason, until }, 'claude');
         this._currentSleepReason = reason;
       }
       this._budgetWasOk = false;
       this._effectiveBudgetOk = false;
       this._inGrace = false;
-      this._emitStatusIfChanged();
-      return;
-    }
+    } else {
+      this._currentSleepReason = null;
+      this._effectiveBudgetOk = true;
 
-    this._currentSleepReason = null;
-    this._effectiveBudgetOk = true;
-
-    // Transition not-ok -> ok: notify + grace_start + wait graceMinutes
-    // before the first cycle. This is the budget-recovery grace only -
-    // manual pauseAll()/resumeAll() never touch _budgetWasOk, so a manual
-    // resume never incurs this wait (see pauseAll/resumeAll below).
-    if (this._budgetWasOk === false) {
-      this._budgetWasOk = true;
-      const graceMinutes = (this.stateObj.settings && this.stateObj.settings.graceMinutes) || 0;
-      // Toast debounce, belt-and-braces: the budget fix (see
-      // budget._outageResult) removed the known flap sources, but a toast
-      // storm is a miserable failure mode for the human (hundreds of
-      // queued beeping notifications, observed live 2026-07-23), so the
-      // recovery toast itself is also rate-limited. Events keep stamping
-      // every transition - only the toast is suppressed.
-      const now = Date.now();
-      if (now - (this._lastRecoveryNotifyAt || 0) >= NOTIFY_DEBOUNCE_MS) {
-        this._lastRecoveryNotifyAt = now;
-        try {
-          this.notifyImpl('Autopilot resuming', 'Usage budget is runnable again', this.stateObj.settings);
-        } catch (err) {
-          util.log('scheduler: notifyImpl threw', String(err && err.message));
+      // Transition not-ok -> ok: notify + grace_start + wait graceMinutes
+      // before the first cycle. This is the budget-recovery grace only -
+      // manual pauseAll()/resumeAll() never touch _budgetWasOk, so a manual
+      // resume never incurs this wait (see pauseAll/resumeAll below).
+      if (this._budgetWasOk === false) {
+        this._budgetWasOk = true;
+        const graceMinutes = (this.stateObj.settings && this.stateObj.settings.graceMinutes) || 0;
+        // Toast debounce, belt-and-braces: the budget fix (see
+        // budget._outageResult) removed the known flap sources, but a toast
+        // storm is a miserable failure mode for the human (hundreds of
+        // queued beeping notifications, observed live 2026-07-23), so the
+        // recovery toast itself is also rate-limited. Events keep stamping
+        // every transition - only the toast is suppressed.
+        const now = Date.now();
+        if (now - (this._lastRecoveryNotifyAt || 0) >= NOTIFY_DEBOUNCE_MS) {
+          this._lastRecoveryNotifyAt = now;
+          try {
+            this.notifyImpl('Autopilot resuming', 'Usage budget is runnable again', this.stateObj.settings);
+          } catch (err) {
+            util.log('scheduler: notifyImpl threw', String(err && err.message));
+          }
         }
+        this._appendGlobalEvent('grace_start', { minutes: graceMinutes }, 'claude');
+        this._graceUntil = Date.now() + graceMinutes * 60000;
+        this._inGrace = graceMinutes > 0;
+      } else if (this._budgetWasOk === null) {
+        this._budgetWasOk = true; // initial state: not a recovery, no grace
       }
-      this._appendGlobalEvent('grace_start', { minutes: graceMinutes });
-      this._graceUntil = Date.now() + graceMinutes * 60000;
-      this._inGrace = graceMinutes > 0;
-    } else if (this._budgetWasOk === null) {
-      this._budgetWasOk = true; // initial state: not a recovery, no grace
+
+      if (this._graceUntil && Date.now() < this._graceUntil) {
+        this._inGrace = true;
+        claudeOk = false;
+      } else {
+        this._graceUntil = 0;
+        this._inGrace = false;
+      }
     }
 
-    if (this._graceUntil && Date.now() < this._graceUntil) {
-      this._inGrace = true;
-      this._emitStatusIfChanged();
-      return;
-    }
-    this._graceUntil = 0;
-    this._inGrace = false;
+    const gates = { claude: claudeOk, codex: this._engineGate('codex').ok };
 
     // 4/5. Fill free cycle slots. Launches are NOT awaited: each cycle
     // chain tracks itself in _running/_cyclePromises and the tick returns
@@ -521,7 +533,7 @@ class Scheduler extends EventEmitter {
     // recomputed after each launch so a just-launched project is excluded.
     const slots = this._concurrency();
     while (this._running.size < slots) {
-      const runnable = this._computeRunnable();
+      const runnable = this._computeRunnable(gates);
       if (runnable.length === 0) break;
 
       const minPriority = Math.min(...runnable.map((r) => r.project.priority));
@@ -554,11 +566,25 @@ class Scheduler extends EventEmitter {
     this._cyclePromises.add(chain);
   }
 
-  _computeRunnable() {
+  // Per-engine launch gate, for engines that have no meter. Fake budgets in
+  // older tests do not implement engineOk; treat that as "no gate".
+  _engineGate(engine) {
+    if (!this.budget || typeof this.budget.engineOk !== 'function') return { ok: true, reason: null, resetsAt: null };
+    try {
+      return this.budget.engineOk(engine) || { ok: true, reason: null, resetsAt: null };
+    } catch (err) {
+      return { ok: true, reason: null, resetsAt: null };
+    }
+  }
+
+  // gates: {claude: bool, codex: bool} - which engines may launch this tick.
+  // Absent (older callers/tests) means every engine may.
+  _computeRunnable(gates) {
     const now = Date.now();
     const runnable = [];
     for (const project of this.stateObj.projects || []) {
       if (!project.enabled) continue;
+      if (gates && gates[enginesModule.normalizeEngine(project.engine)] === false) continue;
       // A project never has two cycles in flight (single-writer git repo /
       // order queue); with concurrency > 1 other projects fill the slots.
       if (this._running.has(project.id)) continue;
@@ -716,6 +742,23 @@ class Scheduler extends EventEmitter {
       cycleProject = Object.assign({}, project, { model: effectiveModel, effort: workerEffort });
     }
 
+    // Provider keys are re-read per cycle (cheap; a key saved on the
+    // Settings page reaches the very next cycle) and Codex's sign-in state
+    // decides whether the OpenAI key doubles as CODEX_API_KEY.
+    let providerKeys;
+    try {
+      providerKeys = keysModule.load();
+    } catch (err) {
+      providerKeys = { openai: null, stability: null, sources: {} };
+    }
+    let codexLoggedIn = null;
+    try {
+      const es = this.engines.current();
+      codexLoggedIn = es && es.codex ? es.codex.loggedIn : null;
+    } catch (err) {
+      codexLoggedIn = null;
+    }
+
     let result;
     try {
       result = await this.runCycleImpl({
@@ -726,6 +769,9 @@ class Scheduler extends EventEmitter {
         budget: this.budget,
         claudeCmd: project.claudeCmd,
         notes: this.stateObj.settings.notes || '',
+        providerKeys,
+        codexLoggedIn,
+        defaultImageModel: this.stateObj.settings.imageModel || null,
       });
     } catch (err) {
       // runCycle's contract is "never rejects"; guard anyway so a broken
@@ -771,7 +817,7 @@ class Scheduler extends EventEmitter {
     // that never touches the budget object itself.
     if (result.exit === 'usage_limit' && this.budget && typeof this.budget.noteUsageLimitExit === 'function') {
       try {
-        this.budget.noteUsageLimitExit();
+        this.budget.noteUsageLimitExit(enginesModule.normalizeEngine(project.engine));
       } catch (err) {
         util.log('scheduler: noteUsageLimitExit threw', String(err && err.message));
       }
@@ -833,8 +879,12 @@ class Scheduler extends EventEmitter {
   // section 4) - there is no separate global log. We replicate these
   // events into every known project's log so each project's own audit
   // trail explains why it wasn't running.
-  _appendGlobalEvent(ev, fields) {
+  // engine (optional): replicate only into projects of that engine - the
+  // Anthropic meter's sleep/grace events would be false explanations in a
+  // Codex project's log, which never waits on that meter.
+  _appendGlobalEvent(ev, fields, engine) {
     for (const project of this.stateObj.projects || []) {
+      if (engine && enginesModule.normalizeEngine(project.engine) !== engine) continue;
       try {
         events.appendEvent(project.dir, project.id, ev, fields);
       } catch (err) {
@@ -876,11 +926,23 @@ class Scheduler extends EventEmitter {
     } else if (isCurrent) {
       status = 'running';
       statusDetail = `cycle ${runningInfo.cycle} (${runningInfo.kind})`;
-    } else if (this.paused || !this._effectiveBudgetOk || this._inGrace) {
+    } else if (this.paused) {
       status = 'sleeping';
-      statusDetail = this.paused
-        ? 'paused'
-        : this._inGrace
+      statusDetail = 'paused';
+    } else if (enginesModule.normalizeEngine(project.engine) === 'codex') {
+      // Codex projects never wait on the Anthropic meter; only on their
+      // own usage-limit latch.
+      const gate = this._engineGate('codex');
+      if (!gate.ok) {
+        status = 'sleeping';
+        statusDetail = `codex usage limit, retry ${gate.resetsAt || 'soon'}`;
+      } else {
+        status = 'queued';
+        statusDetail = 'queued';
+      }
+    } else if (!this._effectiveBudgetOk || this._inGrace) {
+      status = 'sleeping';
+      statusDetail = this._inGrace
         ? 'grace period'
         : (this._lastBudget && this._lastBudget.reason) || 'sleeping';
     } else {
@@ -966,9 +1028,17 @@ class Scheduler extends EventEmitter {
         startedIso: this._startedIso,
         version: VERSION,
         paused: this.paused,
+        // Lets the UI hide Windows-only affordances (the native folder
+        // picker) instead of offering a button that can only fail.
+        platform: process.platform,
       },
       fatal: fatalRecord,
       localModel: this.localModel.current(),
+      engines: this.engines.current(),
+      // Model catalog (one source of truth for every dropdown) and the
+      // masked provider-key summary for the Settings page. Never the keys.
+      models: enginesModule.MODEL_CATALOG,
+      keys: this._keysSummary(),
       budget: {
         ok: this._lastBudget.ok,
         reason: this._lastBudget.reason,
@@ -981,6 +1051,8 @@ class Scheduler extends EventEmitter {
         webhook: this.stateObj.settings.webhook,
         notes: this.stateObj.settings.notes || '',
         concurrency: this._concurrency(),
+        projectsRoot: this.stateObj.settings.projectsRoot || null,
+        imageModel: this.stateObj.settings.imageModel || null,
       },
       // `current` is kept for UI/API compat: the oldest in-flight cycle, or
       // null. `running` is the full slot list (concurrency-aware).
@@ -1042,6 +1114,47 @@ class Scheduler extends EventEmitter {
   startLocalModel() {
     const r = this.localModel.start();
     if (r.ok) this._emitStatusIfChanged(); // flip the UI to "starting" at once
+    return r;
+  }
+
+  // Engine sign-in (settings page): launches the CLI's browser login flow
+  // from the daemon's desktop session. Result shows up on the next probe.
+  startEngineLogin(engine) {
+    return this.engines.login(engine);
+  }
+
+  // ---- provider keys (settings page) --------------------------------------
+
+  _keysSummary() {
+    try {
+      return keysModule.summary(keysModule.load());
+    } catch (err) {
+      return keysModule.summary({ openai: null, stability: null, sources: {} });
+    }
+  }
+
+  // patch: {openai?: string, stability?: string}; '' clears. Returns the
+  // masked summary. The key itself never enters the snapshot or a log.
+  setProviderKeys(patch) {
+    const rec = keysModule.load();
+    for (const p of keysModule.PROVIDERS) {
+      if (patch && Object.prototype.hasOwnProperty.call(patch, p)) keysModule.set(rec, p, patch[p], 'settings');
+    }
+    keysModule.save(rec);
+    this._emitStatusIfChanged();
+    return keysModule.summary(rec);
+  }
+
+  // Fill empty key slots from the environment / nearby .env files.
+  detectProviderKeys() {
+    const r = keysModule.autofill();
+    this._emitStatusIfChanged();
+    return { filled: r.filled, keys: keysModule.summary(r.record) };
+  }
+
+  async refreshEngines() {
+    const r = await this.engines.refresh();
+    this._emitStatusIfChanged();
     return r;
   }
 
@@ -1219,6 +1332,24 @@ class Scheduler extends EventEmitter {
       const n = Number(clean.concurrency);
       if (!Number.isInteger(n) || n < 1 || n > 8) delete clean.concurrency;
       else clean.concurrency = n;
+    }
+    // imageModel: a safe-charset model id, or null/'' to clear.
+    if (Object.prototype.hasOwnProperty.call(clean, 'imageModel')) {
+      const v = clean.imageModel;
+      if (v === null || v === '') clean.imageModel = null;
+      else if (typeof v === 'string' && /^[a-z0-9][a-z0-9.\-]{0,63}$/i.test(v.trim())) clean.imageModel = v.trim();
+      else delete clean.imageModel;
+    }
+    // projectsRoot: an existing absolute directory, or null/'' to clear.
+    if (Object.prototype.hasOwnProperty.call(clean, 'projectsRoot')) {
+      const v = clean.projectsRoot;
+      if (v === null || v === '') {
+        clean.projectsRoot = null;
+      } else if (typeof v === 'string' && path.isAbsolute(v) && fs.existsSync(v) && fs.statSync(v).isDirectory()) {
+        clean.projectsRoot = path.resolve(v);
+      } else {
+        delete clean.projectsRoot;
+      }
     }
     Object.assign(this.stateObj.settings, clean);
     state.save(this.stateObj);

@@ -10,7 +10,10 @@ has headroom, sleeps when it doesn't, commits everything to git, and writes
 plain-English progress notes you can read over coffee.
 
 Zero npm dependencies. Node built-ins only. No build step. State is flat
-files. Windows-first (POSIX mostly works; `boot` autostart is Windows-only).
+files. Developed on Windows; macOS and Linux are supported (notifications,
+run-at-login, containment guard and the usage meter all have native paths),
+but only Windows has been exercised on real hardware. The native folder
+picker in the Add form is Windows-only; type the path elsewhere.
 
 ## Requirements
 
@@ -43,12 +46,76 @@ autopilot list             projects + status, one line each
 autopilot stop [id]        stop one project, or the daemon with no id
 autopilot logs <id>        tail a project's ACTIVITY.log
 autopilot inject <id> <t>  queue a user directive for the next work cycle
-autopilot boot on|off      autostart the daemon at login (Windows)
+autopilot boot on|off      autostart the daemon at login (schtasks / launchd / systemd --user)
 ```
 
 Kill switch that works even with the daemon dead: create
 `<project>/.autopilot/STOP`. The permission guard blocks every tool call of
 a running cycle the moment that file exists.
+
+## Engines
+
+Each project runs on one **engine**, the CLI that executes its cycles:
+
+| Engine | CLI | Billed to | Cycle command |
+|---|---|---|---|
+| `claude` (default) | Claude Code | Anthropic subscription | `claude -p --output-format stream-json` |
+| `codex` | Codex CLI | ChatGPT subscription | `codex exec --json` |
+
+Pick it in the Add form or a project's Config card. Both engines read the
+same preamble on stdin, get the same auto-commit, verify gate, STOP file
+and cycle timeout, and have every provider API key stripped from their
+environment so nothing bills pay-as-you-go credits. The differences:
+
+- **Containment.** Claude cycles get the generated PreToolUse guard and deny
+  rules. Codex has no hook mechanism, so a Codex cycle is confined by
+  Codex's own `--sandbox workspace-write` instead, and STOP is enforced by
+  the daemon's kill poll only (a few seconds, not instantly).
+- **Budget.** The usage meter is Anthropic-only. A Codex project runs until a
+  cycle exits on a usage limit, then that engine sleeps for an hour and the
+  next Codex cycle is the re-check. Codex projects keep running while the
+  Anthropic windows are exhausted, and vice versa.
+- **Models.** Codex model ids are whatever the CLI accepts; `default` means
+  the model in your Codex config. Orchestration (worker model) works on both
+  engines, but the read-only scout subagent is Claude-only.
+
+The **Settings** page in the UI shows whether each CLI is installed and
+signed in, with a Sign in button that launches the CLI's own browser login
+from the daemon's desktop session. Autopilot never sees or stores either
+account's credentials.
+
+## Models and provider keys
+
+Every model dropdown (Add form, Config card, experiment defaults and
+variants) offers one grouped catalog: Anthropic (`claude-*`), OpenAI
+(`gpt-*`, plus `default` for whatever Codex is configured with), the local
+model when it is running, and a "custom model id" entry for anything else.
+Picking a GPT model moves the project to the Codex engine and a Claude
+model moves it back; you never set the engine by hand unless you want to
+override that.
+
+**Provider API keys** (Settings page) are for API-billed use: an OpenAI key
+and a Stability AI key, stored in `~/.autopilot/keys.json` only, masked in
+the UI, never in the registry or a log. Detect fills empty slots from the
+daemon's environment and `.env` files up to two folders under your home
+directory; the daemon also does this once at startup, so a machine that
+already has `OPENAI_API_KEY` set needs no typing. Cycles receive the keys
+as `OPENAI_API_KEY` / `STABILITY_API_KEY`. A signed-in Codex keeps its
+subscription; when Codex is not signed in the OpenAI key becomes its
+`CODEX_API_KEY` fallback. Claude cycles never get an Anthropic key.
+
+**Image generation.** With a key stored, cycles are told about the helper:
+
+```
+node <autopilot>/image.js "<prompt>" --out picture.png [--model <id>] [--aspect 16:9]
+```
+
+Models: `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare` (OpenAI);
+`stable-image-ultra`, `stable-image-core`, `sd3.5-large`,
+`sd3.5-large-turbo`, `sd3.5-medium` (Stability). The default model is a
+Settings choice; a project or experiment variant can pick its own. Image
+models never run cycles; they exist so a project's artifacts can include
+generated art without a cycle wiring up an API by hand.
 
 ## How it works
 
@@ -89,7 +156,7 @@ containment). Nothing machine-specific lives in this repo.
                 "webhook": null, "port": 4680 },
   "projects": [ { "id": "my-project", "dir": "C:/Users/you/my-project",
     "prompt": "the mission text every cycle reads",
-    "priority": 1, "enabled": true, "model": "claude-sonnet-5",
+    "priority": 1, "enabled": true, "engine": "claude", "model": "claude-sonnet-5",
     "maxCycleMinutes": 120, "criticRatio": 5, "reviewGateCycles": 0,
     "containment": "standard", "mcp": [] } ]
 }

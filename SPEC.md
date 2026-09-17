@@ -48,7 +48,8 @@ ONLY OS-level scheduling in the system.
   "prompt": "user's mission prompt (the 'Prime Directive' text)",
   "priority": 1,
   "enabled": true,
-  "model": "claude-fable-5",
+  "engine": "claude",
+  "model": "claude-fable-5-1",
   "maxCycleMinutes": 120,
   "criticRatio": 5,
   "reviewGateCycles": 0,
@@ -248,6 +249,49 @@ the human's own work.
 the UI tails it but charts only from events.jsonl.
 
 ---
+
+**Engine (2026-09-15).** `engine` picks the CLI that runs a project's
+cycles: `claude` (Claude Code, `claude -p`, Anthropic subscription - the
+default and the original) or `codex` (OpenAI Codex CLI, `codex exec --json`,
+ChatGPT subscription). `src/engines.js` owns the per-engine command, argv,
+env stripping and stdout parsing as pure functions; the runner, scheduler
+and preambles branch on the engine only where the engines genuinely differ:
+
+- Containment (section 5) is Claude-only. Codex has no PreToolUse hook, so a
+  Codex cycle relies on Codex's own `--sandbox workspace-write` (network
+  re-enabled) and the daemon's STOP/timeout kill poll. `containment: "off"`
+  maps to Codex's bypass flag.
+- The budget manager (section 3) meters Anthropic only. A Codex usage-limit
+  exit latches that engine for a fixed re-try window (`codexRetryMs`, 1h);
+  the next Codex cycle after it is the re-check. Each engine is gated
+  independently, so one exhausted subscription never idles the other.
+- The scout subagent is a Claude Code agent definition; Codex orchestrators
+  are told to do their own reading (preamble section 5).
+- Every provider key (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `OPENAI_API_KEY`, `CODEX_API_KEY`) is stripped from every cycle's env.
+
+Engine install/sign-in state is probed (`--version`, `codex login status`,
+`claude auth status`) and shown on the UI's Settings page, which can also
+launch each CLI's own browser sign-in from the daemon's desktop session.
+Autopilot reads nothing from either account beyond the Anthropic usage meter
+it already read.
+
+**Provider keys and images (2026-09-16).** `src/keys.js` stores an OpenAI
+and a Stability AI key in `~/.autopilot/keys.json` (separate from the
+registry; 0600 on POSIX; masked everywhere the UI or API can see). They are
+the one deliberate exception to the strip-every-key rule: the runner strips
+all ambient provider keys, then injects the stored ones, because storing a
+key on the Settings page is an explicit decision to let cycles spend it.
+Anthropic keys are never injected. `CODEX_API_KEY` is set only when the
+Codex CLI reports not signed in, so a subscription is never silently
+replaced by API billing. Keys are auto-detected (env, then `.env` files up
+to two levels under home) into EMPTY slots at daemon start and on demand.
+`image.js` at the repo root is the cycle-callable image helper (OpenAI
+Images and Stability Stable Image v2beta); it is a separate file because the
+guard blocks Bash commands that mention `autopilot.js`. The preamble gains
+an "Image generation" section only when a key is stored. The model catalog
+(`engines.MODEL_CATALOG`) ships in the snapshot, and `engineForModel`
+moves a project between engines when its model id changes.
 
 ## 5. Containment profile ("standard")
 

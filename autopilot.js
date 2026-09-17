@@ -231,6 +231,17 @@ function cmdDaemon() {
   const stateObj = state.load();
   const port = (stateObj.settings && stateObj.settings.port) || DEFAULT_PORT;
 
+  // Provider keys: fill EMPTY slots once from the daemon's environment and
+  // nearby .env files, so a machine that already has OPENAI_API_KEY set
+  // needs no typing on the Settings page. Never overwrites a stored key.
+  try {
+    const keysModule = require('./src/keys');
+    const r = keysModule.autofill();
+    if (r.filled.length) util.log(`provider keys detected: ${r.filled.join(', ')}`);
+  } catch (err) {
+    util.log('provider key detection failed', String((err && err.message) || err));
+  }
+
   const budget = new budgetModule.BudgetManager({ settings: stateObj.settings });
   const scheduler = new Scheduler({
     stateObj,
@@ -497,7 +508,18 @@ async function cmdLogs(id) {
 //   linux  - a systemd user unit in ~/.config/systemd/user, enabled with
 //            `systemctl --user enable`. Covers mainstream desktop distros;
 //            systems without systemd get a clear message rather than silence.
-function buildBootPlan(platform, action, nodeExe, scriptPath, homeDir) {
+//
+// pathEnv: the registering shell's PATH, baked into the launchd/systemd
+// entry. Both launch the daemon with a bare system PATH (launchd:
+// /usr/bin:/bin:/usr/sbin:/sbin) that does not contain Homebrew, ~/.local/bin
+// or nvm, so a daemon started at login could not find `claude`, `git` or
+// `node` for the guard hook and every cycle crashed. Windows' scheduled
+// task inherits the user's environment on its own and needs nothing.
+function xmlEscape(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function buildBootPlan(platform, action, nodeExe, scriptPath, homeDir, pathEnv) {
   const path = require('path');
   if (action !== 'on' && action !== 'off') return null;
 
@@ -527,12 +549,21 @@ function buildBootPlan(platform, action, nodeExe, scriptPath, homeDir) {
       `  <string>${label}</string>`,
       '  <key>ProgramArguments</key>',
       '  <array>',
-      `    <string>${nodeExe}</string>`,
-      `    <string>${scriptPath}</string>`,
+      `    <string>${xmlEscape(nodeExe)}</string>`,
+      `    <string>${xmlEscape(scriptPath)}</string>`,
       '    <string>daemon</string>',
       '  </array>',
       '  <key>RunAtLoad</key>',
       '  <true/>',
+      ...(pathEnv
+        ? [
+          '  <key>EnvironmentVariables</key>',
+          '  <dict>',
+          '    <key>PATH</key>',
+          `    <string>${xmlEscape(pathEnv)}</string>`,
+          '  </dict>',
+        ]
+        : []),
       '</dict>',
       '</plist>',
       '',
@@ -551,6 +582,7 @@ function buildBootPlan(platform, action, nodeExe, scriptPath, homeDir) {
       '',
       '[Service]',
       `ExecStart=${nodeExe} ${scriptPath} daemon`,
+      ...(pathEnv ? [`Environment=PATH=${pathEnv}`] : []),
       'Restart=on-failure',
       '',
       '[Install]',
@@ -571,7 +603,7 @@ function cmdBoot(onOff) {
   }
 
   const plan = buildBootPlan(
-    process.platform, onOff, process.execPath, path.resolve(__filename), os.homedir()
+    process.platform, onOff, process.execPath, path.resolve(__filename), os.homedir(), process.env.PATH
   );
   if (!plan) {
     console.log(`autopilot boot: not supported on ${process.platform}`);

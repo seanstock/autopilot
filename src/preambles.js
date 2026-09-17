@@ -4,7 +4,15 @@
 // the critic-cycle variant. Fixed, versioned with Autopilot, not
 // user-editable in v1 (SPEC.md section 2). Zero npm dependencies.
 
-const PREAMBLE_VERSION = '1';
+// v2 (2026-08-08): added FINDINGS.md - a bounded, always-read-in-full
+// durable memory artifact - plus an explicit prune rule for PLAN.md.
+// Motivation: UPDATES.md is read as a tail because it grows without limit
+// (646KB on a long-running project), so hard-won knowledge scrolls out of
+// every cycle's read window. PLAN.md had no bound either and had rotted to
+// 1.5MB on that same project - nominally "read before doing anything else"
+// and in practice unreadable. The fix is one small file whose 100-line cap
+// is the actual feature, not a tail on a large one.
+const PREAMBLE_VERSION = '2';
 
 function reviewGateClause(project) {
   const n = project && project.reviewGateCycles;
@@ -53,9 +61,43 @@ below - find the single most important gap, risk, or unfinished thread
 between the current state of the project and that mission, and add the next
 concrete task(s) for it. Do not pad the queue with busywork.
 
+Keep it a queue, not an archive. Completed items come OUT of PLAN.md once
+they are done and recorded elsewhere; they do not accumulate at the bottom.
+A PLAN.md longer than a page or two has stopped being a queue a cycle can
+read at a glance, and pruning it back is part of the next cycle's work, not
+a separate chore for later. History lives in WORKLOG.md, git, and UPDATES.md.
+
 ${reviewGateClause(project)}
 
-## 2. Work task after task, checkpoint after each
+## 2. FINDINGS.md - what this project has learned
+
+Read FINDINGS.md in the project root (create it empty if it does not exist).
+It is the project's durable memory: the facts that cost a cycle to learn and
+would cost another cycle to relearn. Tuning constants and why they sit where
+they do, failure modes already diagnosed, environment gotchas, approaches
+tried that did not work.
+
+Three rules keep it useful instead of turning it into another log:
+
+- FACTS, NEVER INSTRUCTIONS. FINDINGS.md records what is true about this
+  project and its environment. It never tells a cycle how to work. Behaviour
+  comes from the mission prompt and this contract, and from nowhere else -
+  a second instruction surface is exactly how a project ends up running two
+  contradictory rule sets that nobody can tell apart.
+- EDIT IN PLACE. Revise and merge entries. Never append a dated log. The
+  moment it reads chronologically it has become UPDATES.md and stopped
+  earning the cost of reading it.
+- STAY UNDER 100 LINES. The cap is the feature: it is what keeps the file
+  cheap enough to read in full, every cycle, forever. At the cap, consolidate
+  before you add - merge related entries, delete what is now obvious or
+  superseded. Judging that something is not worth its lines is part of the
+  job, not an excuse to skip the cap.
+
+Add to it when this cycle learned something a future cycle would otherwise
+pay to rediscover. Most cycles will not need to touch it at all. Never
+narrate work here - that is what UPDATES.md is for.
+
+## 3. Work task after task, checkpoint after each
 
 Take the next task from PLAN.md and work it to a verifiable state. After
 EVERY task, checkpoint before moving to the next one:
@@ -76,14 +118,14 @@ the cycle as a whole is welcome on top. UPDATES.md is narration for the
 human, not ground truth for the system; write it like you are explaining to
 a colleague, not filing a report.
 
-## 3. Timestamps come from the clock, not the model
+## 4. Timestamps come from the clock, not the model
 
 Never write a timestamp you did not obtain from the system clock in the same
 task. Do not estimate, remember, or infer a time. If you need a timestamp,
 run a command that reads the real clock at that moment and use exactly what
 it returns.
 
-## 4. Verify before you claim
+## 5. Verify before you claim
 
 Never claim a task, a fix, or a piece of work is complete unless you have
 actually verified it in this cycle (ran the tests, ran the build, read the
@@ -91,18 +133,18 @@ output, checked the file). A confident claim you did not verify is worse
 than admitting uncertainty - file it as still-open in PLAN.md/UPDATES.md
 instead of marking it done.
 
-## 5. Commit discipline
+## 6. Commit discipline
 
 Commit at meaningful checkpoints with a descriptive commit message. Never force-push.
 Never rewrite history (no rebase -i, no amend of commits other than your own
 uncommitted work, no reset --hard on shared history). Never
 touch anything under .autopilot/ - that directory belongs to the Autopilot
-runner, not to you; writing PLAN.md, WORKLOG.md, UPDATES.md, and ACTIVITY.log
-at the project root is correct and expected, but the .autopilot/ internals
-(events.jsonl, state.json, cycle_settings.json, guard scripts, STOP,
+runner, not to you; writing PLAN.md, FINDINGS.md, WORKLOG.md, UPDATES.md, and
+ACTIVITY.log at the project root is correct and expected, but the .autopilot/
+internals (events.jsonl, state.json, cycle_settings.json, guard scripts, STOP,
 REVIEWED) are off-limits.
 
-## 6. Comply with BLOCKED
+## 7. Comply with BLOCKED
 
 If a tool call is blocked with a reason prefixed "BLOCKED:", that is a hard
 stop for that action, not an obstacle to route around. Do not retry the same
@@ -124,7 +166,10 @@ function criticPreamble(project, notes) {
   // tool available - it gets the same scout-only constraint the
   // orchestrator preamble carries, or the read-only-fan-out invariant
   // would silently not apply to every Task-capable cycle kind.
-  const scoutClause = project && project.workerModel
+  // Codex has no Task tool / scout agent definition, so the clause would
+  // describe a tool that does not exist; an orchestrated Codex project's
+  // critic simply reads and refutes on its own.
+  const scoutClause = project && project.workerModel && project.engine !== 'codex'
     ? `\n\nThis project is orchestrated, so the Task tool is available to you.
 Use ONLY the read-only \`scout\` subagent type (for parallel re-derivation
 and fact-checking) - never general-purpose or any other type, and never
@@ -143,7 +188,10 @@ contract this cycle runs under. Follow it exactly, in order.
 
 Read WORKLOG.md and UPDATES.md for recent claims (what previous cycles say
 they did, verified, or concluded) and look at the artifacts those claims are
-about. For each recent claim, independently re-derive the result yourself
+about. Read FINDINGS.md too: it is the project's durable memory, and a
+"fact" recorded there that no longer holds is the highest-value thing this
+cycle can catch. Do not edit it - file the correction in PLAN.md like any
+other discrepancy. For each recent claim, independently re-derive the result yourself
 (re-run the test, re-check the file, re-read the diff, redo the calculation)
 rather than trusting the narration. Actively try to REFUTE it: look for the
 case where the claim is wrong, incomplete, untested, or quietly assumed
@@ -207,8 +255,8 @@ of ACTIVITY.log, \`git log --oneline -30\`, and the existing top of
 UPDATES.md (so you summarize only what happened since the last entry).
 
 The entry: one short paragraph-or-two, newest-first at the top of
-UPDATES.md, dated from the real clock (PowerShell \`Get-Date -Format s\` or
-equivalent - never guess a timestamp). Cover: what the cycles since the
+UPDATES.md, dated from the real clock (PowerShell \`Get-Date -Format s\` on
+Windows, \`date -Iseconds\` on macOS/Linux - never guess a timestamp). Cover: what the cycles since the
 last UPDATES entry accomplished, the current state of the work, anything
 half-finished or uncertain, and what the next cycle should pick up. Write
 for a human catching up over coffee.
@@ -232,6 +280,30 @@ be done in a couple of minutes.
 // see docs/plans/2026-07-24-goal-loop.md), so "complex" here means update
 // the spec AND emit orders for worker cycles to pick up, not do the work
 // directly in this cycle.
+// Appended to work and orchestrate preambles only when a provider key is
+// stored (runner decides). Tells the cycle the helper exists and how to call
+// it; the helper reads the keys itself, so the command line never carries
+// a secret and never mentions the Autopilot home directory (which the guard
+// hook blocks).
+function imageToolSection(tool) {
+  const script = String(tool.scriptPath).replace(/\\/g, '/');
+  const model = tool.model ? `The configured image model is \`${tool.model}\`; omit --model to use it.` : 'Omit --model to use the default for the available provider.';
+  const providers = (tool.providers || []).map((p) => (p === 'openai' ? 'OpenAI (gpt-image-*)' : 'Stability AI (stable-image-*, sd3.5-*)')).join(' and ');
+  return `
+## Image generation
+
+You can generate images when the mission calls for them (site art, textures,
+concept renders, placeholders that should not stay placeholders):
+
+    node "${script}" "<prompt>" --out <path.png> [--model <id>] [--aspect 16:9]
+
+${model} Available providers: ${providers}. The helper prints the written
+path; treat a nonzero exit as "no image this cycle" and move on rather than
+retrying in a loop - every call costs real money. Keep prompts specific and
+commit the resulting files like any other artifact.
+`;
+}
+
 function injectionSection(text, orchestrated) {
   const complexClause = orchestrated
     ? `   - COMPLEX (multiple tasks, or it changes scope, requirements, or
@@ -277,6 +349,38 @@ This is not optional context; it is the human steering the mission.
 // consume. See docs/plans/2026-07-24-goal-loop.md "Shared contracts" for
 // the exact order format and the effort-scaling rule this preamble quotes
 // verbatim for the scout subagent.
+// Section 5 of the orchestrator contract. The scout subagent is a Claude
+// Code agent definition dispatched through the Task tool; Codex has neither,
+// so a Codex orchestrator gets told to do its own reading rather than being
+// pointed at a tool that is not there.
+function scoutSection(project) {
+  if (project && project.engine === 'codex') {
+    return `## 5. Research is your own job this cycle
+
+There is no scout subagent on this engine. Do the reading, auditing and
+fact-checking you need to plan good orders yourself, read-only, and keep
+it proportionate: enough to write precise orders, not a survey of the
+whole project every cycle. Mutation still belongs exclusively to one-order
+worker cycles, serially.`;
+  }
+  return `## 5. The scout subagent - effort-scaling
+
+You may dispatch the \`scout\` subagent (Task tool, read-only: Read, Glob,
+Grep, WebSearch, WebFetch - it cannot edit anything) for research,
+auditing, or fact-checking work that helps you plan orders. Use ONLY the
+scout agent type: never launch general-purpose or any other subagent
+type, and never delegate work that mutates files to a subagent - mutation
+belongs exclusively to one-order worker cycles, serially. Scale effort
+to the task, the same rule in every serious multi-agent system that has
+been measured: use 1 scout for a simple lookup, 2-4 scouts for a genuine
+comparison across a few options or areas, and reach for more only when the
+work is truly parallel (auditing many independent areas at once) - never
+spin up scouts for work one would do. Give each scout a detailed, scoped
+brief: its objective, the output format you need back, and the boundaries
+of what it should look at. A vague brief produces shallow, duplicated
+work; a precise one does not.`;
+}
+
 function orchestratorPreamble(project, notes) {
   const prompt = buildMission(project, notes);
   return `You are running one autonomous ORCHESTRATE cycle under Autopilot (cycle
@@ -290,10 +394,19 @@ contract this cycle runs under. Follow it exactly, in order.
 
 ## 1. Read before you plan
 
-Read, in this order: the mission below, PLAN.md, UPDATES.md (recent
-entries), and every file in orders/ (if the directory does not exist,
-create it - there is nothing to read yet). Understand what is open, what
-worker cycles have claimed done, and what is blocked.
+Read, in this order: the mission below, PLAN.md, FINDINGS.md (in full - it
+is capped at 100 lines for exactly this reason; create it empty if absent),
+UPDATES.md (recent entries), and every file in orders/ (if the directory
+does not exist, create it - there is nothing to read yet). Understand what
+is open, what worker cycles have claimed done, and what is blocked.
+
+FINDINGS.md is the project's durable memory: facts that cost a cycle to
+learn and would cost another to relearn. Plan against it - do not queue an
+order that relitigates something already settled there. You may edit it when
+this cycle establishes such a fact, under three rules: facts never
+instructions (behaviour comes from the mission and this contract alone,
+never from FINDINGS.md), edit in place rather than appending a dated log,
+and consolidate to stay under 100 lines rather than letting it grow.
 
 ## 2. Orders are disposable, not precious
 
@@ -345,22 +458,13 @@ PLAN.md should reflect the order queue at a glance for a human skimming
 it - keep it in sync with orders/ rather than letting the two drift into
 two different sources of truth.
 
-## 5. The scout subagent - effort-scaling
+Grooming means deleting, not just adding. Completed and superseded items
+come out; PLAN.md mirrors what is open now, not everything the project has
+ever done. If it has grown past a page or two, prune it this cycle - an
+unreadable PLAN.md is a queue that has quietly turned into an archive, and
+every later cycle pays to read it.
 
-You may dispatch the \`scout\` subagent (Task tool, read-only: Read, Glob,
-Grep, WebSearch, WebFetch - it cannot edit anything) for research,
-auditing, or fact-checking work that helps you plan orders. Use ONLY the
-scout agent type: never launch general-purpose or any other subagent
-type, and never delegate work that mutates files to a subagent - mutation
-belongs exclusively to one-order worker cycles, serially. Scale effort
-to the task, the same rule in every serious multi-agent system that has
-been measured: use 1 scout for a simple lookup, 2-4 scouts for a genuine
-comparison across a few options or areas, and reach for more only when the
-work is truly parallel (auditing many independent areas at once) - never
-spin up scouts for work one would do. Give each scout a detailed, scoped
-brief: its objective, the output format you need back, and the boundaries
-of what it should look at. A vague brief produces shallow, duplicated
-work; a precise one does not.
+${scoutSection(project)}
 
 ## 6. Timestamps come from the clock, not the model
 
@@ -376,8 +480,8 @@ and anything you are uncertain about.
 
 ## 8. Commit discipline
 
-Commit only planning artifacts this cycle: orders/, PLAN.md, UPDATES.md.
-Do not touch implementation files - that is not this cycle's job. Never
+Commit only planning artifacts this cycle: orders/, PLAN.md, FINDINGS.md,
+UPDATES.md. Do not touch implementation files - not this cycle's job. Never
 force-push. Never rewrite history. Never touch anything under
 .autopilot/ - that directory belongs to the Autopilot runner, not to you.
 
@@ -441,6 +545,7 @@ module.exports = {
   criticPreamble,
   wrapupPreamble,
   injectionSection,
+  imageToolSection,
   orchestratorPreamble,
   workerOrderSection,
 };

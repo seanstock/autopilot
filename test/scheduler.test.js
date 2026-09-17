@@ -426,7 +426,7 @@ test('token/cost totals accumulate per model, stamp cycle_end, and reach the sna
 });
 
 test('worker cycle routes workerModel + workerEffort (inherits effort when workerEffort unset)', async () => {
-  const project = makeProject({ model: 'claude-opus-4-8', effort: 'high', workerModel: 'claude-sonnet-5' });
+  const project = makeProject({ model: 'claude-opus-5', effort: 'high', workerModel: 'claude-sonnet-5' });
   const stateObj = makeStateObj([project]);
   const ordersDir = path.join(project.dir, 'orders');
   fs.mkdirSync(ordersDir, { recursive: true });
@@ -450,7 +450,7 @@ test('worker cycle routes workerModel + workerEffort (inherits effort when worke
 });
 
 test('worker cycle uses workerEffort override when set', async () => {
-  const project = makeProject({ model: 'claude-opus-4-8', effort: 'high', workerModel: 'claude-sonnet-5', workerEffort: 'low' });
+  const project = makeProject({ model: 'claude-opus-5', effort: 'high', workerModel: 'claude-sonnet-5', workerEffort: 'low' });
   const stateObj = makeStateObj([project]);
   const ordersDir = path.join(project.dir, 'orders');
   fs.mkdirSync(ordersDir, { recursive: true });
@@ -474,14 +474,14 @@ test('updateProject command validates, persists, and applies to the next cycle',
   const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl: async () => cleanResult(), notifyImpl: () => {}, tickMs: 999999 });
 
   assert.equal(sched.updateProject('nope', { model: 'x' }), false, 'unknown project -> false');
-  assert.equal(sched.updateProject(project.id, { model: 'claude-opus-4-8', effort: 'xhigh' }), true);
+  assert.equal(sched.updateProject(project.id, { model: 'claude-opus-5', effort: 'xhigh' }), true);
 
   // persisted to projects.json and reflected in the snapshot
   const reloaded = state.getProject(state.load(), project.id);
-  assert.equal(reloaded.model, 'claude-opus-4-8');
+  assert.equal(reloaded.model, 'claude-opus-5');
   assert.equal(reloaded.effort, 'xhigh');
   const snap = sched.snapshot();
-  assert.equal(snap.projects[0].model, 'claude-opus-4-8');
+  assert.equal(snap.projects[0].model, 'claude-opus-5');
   assert.equal(snap.projects[0].effort, 'xhigh');
 });
 
@@ -511,7 +511,7 @@ test('stuck order: same order re-dispatched at most 3 times, then a grooming orc
 });
 
 test('modelUsage breakdown attributes totals per actual model (subagent fan-out)', async () => {
-  const project = makeProject({ workerModel: 'claude-sonnet-5', model: 'claude-fable-5' });
+  const project = makeProject({ workerModel: 'claude-sonnet-5', model: 'claude-fable-5-1' });
   const stateObj = makeStateObj([project]);
 
   let runs = 0;
@@ -521,7 +521,7 @@ test('modelUsage breakdown attributes totals per actual model (subagent fan-out)
       tokens: { in: 5000, out: 500 },
       costUsd: 3.0,
       modelUsage: {
-        'claude-fable-5': { in: 1000, out: 100, costUsd: 2.0 },
+        'claude-fable-5-1': { in: 1000, out: 100, costUsd: 2.0 },
         'claude-sonnet-5': { in: 4000, out: 400, costUsd: 1.0 },
       },
     });
@@ -538,9 +538,9 @@ test('modelUsage breakdown attributes totals per actual model (subagent fan-out)
   // Per-cycle invariants (checked proportionally since >1 cycle may run):
   assert.equal(runtime.totals.in, firstCycle.cycles * 5000, 'overall in = sum of per-model in');
   assert.ok(Math.abs(runtime.totals.costUsd - firstCycle.cycles * 3.0) < 1e-9);
-  assert.equal(runtime.totals.byModel['claude-fable-5'].in, firstCycle.cycles * 1000);
+  assert.equal(runtime.totals.byModel['claude-fable-5-1'].in, firstCycle.cycles * 1000);
   assert.equal(runtime.totals.byModel['claude-sonnet-5'].in, firstCycle.cycles * 4000);
-  assert.equal(runtime.totals.byModel['claude-fable-5'].cycles, firstCycle.cycles, 'each participating model counts the cycle');
+  assert.equal(runtime.totals.byModel['claude-fable-5-1'].cycles, firstCycle.cycles, 'each participating model counts the cycle');
   assert.equal(runtime.totals.byModel['claude-sonnet-5'].cycles, firstCycle.cycles);
 
   const evs = events.readEvents(project.dir, 50);
@@ -554,10 +554,10 @@ test('totals backfill seeds once from existing events.jsonl', async () => {
   const stateObj = makeStateObj([project]);
 
   events.appendEvent(project.dir, project.id, 'cycle_end', {
-    cycle: 1, kind: 'work', model: 'claude-fable-5', tokens: { in: 7000, out: 300 }, costUsd: 2.25,
+    cycle: 1, kind: 'work', model: 'claude-fable-5-1', tokens: { in: 7000, out: 300 }, costUsd: 2.25,
   });
   events.appendEvent(project.dir, project.id, 'cycle_end', {
-    cycle: 2, kind: 'work', model: 'claude-fable-5', tokens: { in: 3000, out: 200 }, costUsd: 0.75,
+    cycle: 2, kind: 'work', model: 'claude-fable-5-1', tokens: { in: 3000, out: 200 }, costUsd: 0.75,
   });
 
   const sched = new Scheduler({ stateObj, budget: makeBudget(), runCycleImpl: async () => cleanResult(), notifyImpl: () => {}, tickMs: 15 });
@@ -568,7 +568,7 @@ test('totals backfill seeds once from existing events.jsonl', async () => {
   assert.equal(t.in, 10000);
   assert.equal(t.out, 500);
   assert.ok(Math.abs(t.costUsd - 3.0) < 1e-9);
-  assert.equal(t.byModel['claude-fable-5'].cycles, 2);
+  assert.equal(t.byModel['claude-fable-5-1'].cycles, 2);
 
   const persisted = state.readRuntime(project.dir);
   assert.equal(persisted.totals.cycles, 2, 'backfill persists so it never re-scans');
@@ -999,15 +999,18 @@ test('snapshot matches the shared status contract shape', async () => {
   // appearing silently; that reasoning still holds, hence the edit rather than
   // a loosened assertion. See src/localmodel.js for why availability is a
   // probe plus an ANTHROPIC_BASE_URL check rather than just a probe.
-  assert.deepEqual(Object.keys(snap).sort(), ['budget', 'concurrency', 'current', 'daemon', 'fatal', 'localModel', 'projects', 'running', 'settings', 'totals'].sort());
+  assert.deepEqual(Object.keys(snap).sort(), ['budget', 'concurrency', 'current', 'daemon', 'engines', 'fatal', 'keys', 'localModel', 'models', 'projects', 'running', 'settings', 'totals'].sort());
   assert.deepEqual(Object.keys(snap.localModel).sort(),
     ['available', 'canStart', 'id', 'label', 'reason', 'starting', 'startError'].sort());
-  assert.deepEqual(Object.keys(snap.daemon).sort(), ['pid', 'startedIso', 'version', 'paused'].sort());
+  // 'platform' was added 2026-09-15 so the UI can hide the Windows-only
+  // native folder picker on macOS/Linux rather than show a button that 501s.
+  assert.deepEqual(Object.keys(snap.daemon).sort(), ['pid', 'startedIso', 'version', 'paused', 'platform'].sort());
+  assert.equal(snap.daemon.platform, process.platform);
   assert.deepEqual(Object.keys(snap.budget).sort(), ['ok', 'reason', 'checkedIso', 'windows'].sort());
   // 'notes' is the shared "things to know" prepended to every project's
   // mission. It rides in settings so the UI can edit it in one place.
   assert.deepEqual(Object.keys(snap.settings).sort(),
-    ['ceilingPct', 'graceMinutes', 'webhook', 'notes', 'concurrency'].sort());
+    ['ceilingPct', 'graceMinutes', 'webhook', 'notes', 'concurrency', 'projectsRoot', 'imageModel'].sort());
 
   const p = snap.projects[0];
   for (const key of ['status', 'statusDetail', 'cycle', 'sinceReview', 'lastExit', 'lastCommit', 'lastVerify', 'pendingInject', 'totals', 'orders']) {
@@ -1083,7 +1086,7 @@ test('orchestration enabled + one open order: work kind, correct order id, effec
 });
 
 test('orchestration enabled + zero open orders: orchestrate kind, project.model (big model)', async () => {
-  const project = makeProject({ criticRatio: 0, workerModel: 'claude-haiku-4-5-20251001', model: 'claude-fable-5' });
+  const project = makeProject({ criticRatio: 0, workerModel: 'claude-haiku-4-5-20251001', model: 'claude-fable-5-1' });
   writeOrder(project.dir, '001-done.md', 'done');
   writeOrder(project.dir, '002-blocked.md', 'blocked');
   const stateObj = makeStateObj([project]);
@@ -1101,7 +1104,7 @@ test('orchestration enabled + zero open orders: orchestrate kind, project.model 
 
   assert.equal(received[0].kind, 'orchestrate');
   assert.equal(received[0].order, null);
-  assert.equal(received[0].project.model, 'claude-fable-5', 'orchestrate cycles use the big model, not workerModel');
+  assert.equal(received[0].project.model, 'claude-fable-5-1', 'orchestrate cycles use the big model, not workerModel');
 });
 
 test('critic cadence still fires ahead of order-based work even when orchestration is enabled', async () => {
@@ -1189,7 +1192,7 @@ test('cycle_end verify is null when the fake result omits it', async () => {
 });
 
 test('totals attribute the effective model (workerModel) for order-driven work cycles', async () => {
-  const project = makeProject({ criticRatio: 0, workerModel: 'claude-haiku-4-5-20251001', model: 'claude-fable-5' });
+  const project = makeProject({ criticRatio: 0, workerModel: 'claude-haiku-4-5-20251001', model: 'claude-fable-5-1' });
   writeOrder(project.dir, '001-open.md', 'open');
   const stateObj = makeStateObj([project]);
 
@@ -1205,7 +1208,7 @@ test('totals attribute the effective model (workerModel) for order-driven work c
 
   const runtime = state.readRuntime(project.dir);
   assert.equal(runtime.totals.byModel['claude-haiku-4-5-20251001'].cycles, 1);
-  assert.equal(runtime.totals.byModel['claude-fable-5'], undefined, 'the big model must not be credited for a worker cycle');
+  assert.equal(runtime.totals.byModel['claude-fable-5-1'], undefined, 'the big model must not be credited for a worker cycle');
 });
 
 test('snapshot orders counts reflect a temp orders/ dir, null when orchestration disabled', async () => {
@@ -1357,4 +1360,136 @@ test('stopDaemon waits for ALL concurrent cycles and STOPs each running project'
   for (const dir of dirs) {
     assert.equal(fs.existsSync(path.join(dir, '.autopilot', 'STOP')), false, `shutdown STOP cleaned up in ${dir}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// engines (2026-09-15): codex projects are gated by their own latch, never
+// by the Anthropic meter
+// ---------------------------------------------------------------------------
+
+test('a codex project keeps running while the Anthropic meter is over ceiling; a claude project sleeps', async () => {
+  const claudeP = makeProject({ id: 'claude-p', engine: 'claude' });
+  const codexP = makeProject({ id: 'codex-p', engine: 'codex', model: 'default' });
+  const stateObj = makeStateObj([claudeP, codexP], { graceMinutes: 0 });
+  const budget = makeBudget({
+    async check() {
+      return { ok: false, reason: 'ceiling', windows: [], resetsAt: null, checkedIso: util.nowIso() };
+    },
+  });
+  budget.engineOk = (engine) => ({ ok: true, reason: null, resetsAt: null });
+
+  const seen = [];
+  const runCycleImpl = async ({ project }) => {
+    seen.push(project.id);
+    return cleanResult();
+  };
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => seen.length >= 3);
+  const snap = sched.snapshot();
+  await sched.stopDaemon();
+
+  assert.ok(seen.every((id) => id === 'codex-p'), `only codex cycles expected, got ${JSON.stringify(seen)}`);
+  const byId = Object.fromEntries(snap.projects.map((p) => [p.id, p]));
+  assert.equal(byId['claude-p'].status, 'sleeping');
+  assert.equal(byId['claude-p'].statusDetail, 'ceiling');
+  assert.notEqual(byId['codex-p'].status, 'sleeping');
+});
+
+test('a codex usage-limit exit latches only codex; the sleep event is stamped into claude projects only', async () => {
+  const claudeP = makeProject({ id: 'claude-q', engine: 'claude' });
+  const codexP = makeProject({ id: 'codex-q', engine: 'codex', model: 'default' });
+  // capSummary off: otherwise the usage-limit exit also triggers the wrapup
+  // cycle, which exits usage_limit again under this fake and notes twice.
+  const stateObj = makeStateObj([claudeP, codexP], { graceMinutes: 0, capSummary: false });
+  let codexLatched = false;
+  const notes = [];
+  const budget = makeBudget({
+    noteUsageLimitExit(engine) { notes.push(engine); if (engine === 'codex') codexLatched = true; },
+  });
+  budget.engineOk = (engine) => (engine === 'codex' && codexLatched
+    ? { ok: false, reason: 'ceiling', resetsAt: '2099-01-01T00:00:00Z' }
+    : { ok: true, reason: null, resetsAt: null });
+
+  const seen = [];
+  const runCycleImpl = async ({ project }) => {
+    seen.push(project.id);
+    if (project.id === 'codex-q') return cleanResult({ exit: 'usage_limit', commit: null });
+    return cleanResult();
+  };
+  const sched = new Scheduler({ stateObj, budget, runCycleImpl, notifyImpl: () => {}, tickMs: 15 });
+  sched.start();
+  await waitUntil(() => seen.filter((id) => id === 'claude-q').length >= 3);
+  const snap = sched.snapshot();
+  await sched.stopDaemon();
+
+  assert.deepEqual(notes, ['codex']);
+  assert.equal(seen.filter((id) => id === 'codex-q').length, 1, 'codex ran once, then its latch held it');
+  const byId = Object.fromEntries(snap.projects.map((p) => [p.id, p]));
+  assert.equal(byId['codex-q'].status, 'sleeping');
+  assert.match(byId['codex-q'].statusDetail, /codex usage limit/);
+  assert.notEqual(byId['claude-q'].status, 'sleeping');
+});
+
+test('_appendGlobalEvent with an engine filter skips the other engine\'s projects', () => {
+  const claudeP = makeProject({ engine: 'claude' });
+  const codexP = makeProject({ engine: 'codex', model: 'default' });
+  const sched = new Scheduler({ stateObj: makeStateObj([claudeP, codexP]), budget: makeBudget(), runCycleImpl: async () => cleanResult(), notifyImpl: () => {} });
+  sched._appendGlobalEvent('sleep', { reason: 'ceiling', until: null }, 'claude');
+  assert.equal(events.readEvents(claudeP.dir).filter((e) => e.ev === 'sleep').length, 1);
+  assert.equal(events.readEvents(codexP.dir).filter((e) => e.ev === 'sleep').length, 0);
+  sched._appendGlobalEvent('sleep', { reason: 'paused', until: null });
+  assert.equal(events.readEvents(codexP.dir).filter((e) => e.ev === 'sleep').length, 1, 'no filter: every project');
+});
+
+test('snapshot carries engines status and settings.projectsRoot', () => {
+  const fakeEngines = {
+    current: () => ({ claude: { id: 'claude', installed: true, loggedIn: true }, codex: { id: 'codex', installed: false, loggedIn: false } }),
+    refresh: async () => ({}),
+    login: () => ({ ok: true }),
+  };
+  const sched = new Scheduler({ stateObj: makeStateObj([], { projectsRoot: null }), budget: makeBudget(), runCycleImpl: async () => cleanResult(), notifyImpl: () => {}, engines: fakeEngines });
+  const snap = sched.snapshot();
+  assert.equal(snap.engines.codex.installed, false);
+  assert.equal(snap.settings.projectsRoot, null);
+  assert.equal(sched.startEngineLogin('codex').ok, true);
+});
+
+test('updateSettings validates projectsRoot: existing absolute dir kept, junk dropped, empty clears', () => {
+  const sched = new Scheduler({ stateObj: makeStateObj([]), budget: makeBudget(), runCycleImpl: async () => cleanResult(), notifyImpl: () => {} });
+  const dir = tempProjectDir('root');
+  assert.equal(sched.updateSettings({ projectsRoot: dir }).projectsRoot, path.resolve(dir));
+  assert.equal(sched.updateSettings({ projectsRoot: 'relative/nope' }).projectsRoot, path.resolve(dir), 'invalid value ignored');
+  assert.equal(sched.updateSettings({ projectsRoot: path.join(dir, 'does-not-exist') }).projectsRoot, path.resolve(dir));
+  assert.equal(sched.updateSettings({ projectsRoot: '' }).projectsRoot, null);
+});
+
+test('setProviderKeys / detectProviderKeys persist to keys.json and surface masked in the snapshot', () => {
+  const sched = new Scheduler({ stateObj: makeStateObj([]), budget: makeBudget(), runCycleImpl: async () => cleanResult(), notifyImpl: () => {} });
+  const s = sched.setProviderKeys({ openai: 'sk-proj-1234567890abc' });
+  assert.equal(s.openai.set, true);
+  assert.equal(s.openai.masked, 'sk-pr...abc');
+  assert.equal(sched.snapshot().keys.openai.set, true);
+  assert.doesNotMatch(JSON.stringify(sched.snapshot()), /1234567890/, 'the key never enters the snapshot');
+  sched.setProviderKeys({ openai: '' });
+  assert.equal(sched.snapshot().keys.openai.set, false);
+  assert.equal(sched.updateSettings({ imageModel: 'gpt-image-2.5-flare' }).imageModel, 'gpt-image-2.5-flare');
+  assert.equal(sched.updateSettings({ imageModel: 'bad model!' }).imageModel, 'gpt-image-2.5-flare');
+  assert.equal(sched.updateSettings({ imageModel: '' }).imageModel, null);
+});
+
+test('runCycleImpl receives providerKeys, codexLoggedIn and defaultImageModel', async () => {
+  const project = makeProject();
+  const stateObj = makeStateObj([project], { imageModel: 'stable-image-core' });
+  const fakeEngines = { current: () => ({ claude: { loggedIn: true }, codex: { loggedIn: false } }), refresh: async () => ({}), login: () => ({ ok: true }) };
+  let received = null;
+  const sched = new Scheduler({ stateObj, budget: makeBudget(), notifyImpl: () => {}, tickMs: 15, engines: fakeEngines,
+    runCycleImpl: async (opts) => { received = opts; return cleanResult(); } });
+  sched.setProviderKeys({ stability: 'sk-stab' });
+  sched.start();
+  await waitUntil(() => received !== null);
+  await sched.stopDaemon();
+  assert.equal(received.providerKeys.stability, 'sk-stab');
+  assert.equal(received.codexLoggedIn, false);
+  assert.equal(received.defaultImageModel, 'stable-image-core');
 });

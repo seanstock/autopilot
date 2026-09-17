@@ -93,6 +93,16 @@ function projectMeta(dir) {
 // (spawn-arg guard) cannot drift out of agreement.
 const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
+// How to invoke the Claude Code CLI on this platform: command + leading
+// args. On Windows an npm-installed `claude` is a .cmd shim, which Node's
+// spawn() cannot run without a shell, so it goes through `cmd /c`. Shared
+// by the runner (real cycles) and the budget probe so they cannot drift:
+// the probe used to spawn a bare 'claude' and silently failed under the
+// .cmd shim, which turned every meter outage into a permanent sleep.
+function claudeCommand(platform) {
+  return (platform || process.platform) === 'win32' ? ['cmd', '/c', 'claude'] : ['claude'];
+}
+
 module.exports = {
   get AUTOPILOT_HOME() {
     return resolveAutopilotHome();
@@ -105,4 +115,5 @@ module.exports = {
   log,
   projectMeta,
   EFFORT_LEVELS,
+  claudeCommand,
 };

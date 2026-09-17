@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 const util = require('./util');
+const { engineForModel } = require('./engines');
 
 const PROJECTS_FILENAME = 'projects.json';
 const FATAL_FILENAME = 'fatal.json';
@@ -22,11 +23,21 @@ const DEFAULT_SETTINGS = {
   // DIFFERENT projects (a single project is always one-at-a-time). 1 = the
   // original serial behavior.
   concurrency: 1,
+  // Where the UI's directory browser starts when adding a project, and the
+  // suggested parent for new ones. null = the user's home directory.
+  projectsRoot: null,
+  // Default model for image.js when a project sets none. null = first
+  // provider with a stored key.
+  imageModel: null,
 };
 
 const PROJECT_DEFAULTS = {
   priority: 1,
   enabled: true,
+  // Which CLI runs the cycles: 'claude' (Claude Code, Anthropic
+  // subscription) or 'codex' (Codex CLI, ChatGPT subscription). See
+  // src/engines.js. Model ids are per engine.
+  engine: 'claude',
   model: 'claude-sonnet-5',
   maxCycleMinutes: 120,
   // Off by default. The critic reads the loop's own WORKLOG/UPDATES narration
@@ -167,6 +178,16 @@ function addProject(stateObj, opts) {
 
   for (const key of EDITABLE_KEYS) applyProjectField(project, key, options[key], false);
 
+  // Engine follows the model when the caller did not say otherwise: picking
+  // a GPT model in any dropdown is picking Codex. An explicit engine wins.
+  if (options.engine === undefined) {
+    const implied = engineForModel(project.model);
+    if (implied) project.engine = implied;
+  }
+  // A Codex project created without an explicit model must not inherit the
+  // Claude default: 'default' means "whatever Codex is configured to use".
+  if (project.engine === 'codex' && options.model === undefined) project.model = 'default';
+
   stateObj.projects.push(project);
   return project;
 }
@@ -177,6 +198,7 @@ function addProject(stateObj, opts) {
 const EDITABLE_KEYS = [
   'prompt',
   'priority',
+  'engine',
   'model',
   'workerModel',
   'effort',
@@ -186,6 +208,7 @@ const EDITABLE_KEYS = [
   'reviewGateCycles',
   'containment',
   'verifyCmd',
+  'imageModel',
   'enabled',
   // Experiments (2026-08-07 spec): hard cycle cap; the scheduler disables
   // the project when runtime.cycle reaches it. 0/absent = uncapped.
@@ -226,10 +249,14 @@ function applyProjectField(target, key, value, allowClear) {
     if (value === 'standard' || value === 'off') target[key] = value;
     return;
   }
-  if (key === 'model' || key === 'workerModel') {
+  if (key === 'engine') {
+    if (value === 'claude' || value === 'codex') target[key] = value;
+    return;
+  }
+  if (key === 'model' || key === 'workerModel' || key === 'imageModel') {
     if (typeof value === 'string' && MODEL_RE.test(value.trim())) {
       target[key] = value.trim();
-    } else if (allowClear && isClear && key === 'workerModel') {
+    } else if (allowClear && isClear && key !== 'model') {
       delete target[key];
     }
     return;
@@ -266,6 +293,12 @@ function updateProject(stateObj, id, patch) {
   const project = getProject(stateObj, id);
   if (!project || !patch || typeof patch !== 'object') return null;
   for (const key of EDITABLE_KEYS) applyProjectField(project, key, patch[key], true);
+  // Same rule as addProject: a model change with no explicit engine moves
+  // the project to the engine that model runs on.
+  if (patch.engine === undefined && typeof patch.model === 'string') {
+    const implied = engineForModel(project.model);
+    if (implied) project.engine = implied;
+  }
   return project;
 }
 
