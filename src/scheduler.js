@@ -37,6 +37,7 @@ const notifyModule = require('./notify');
 const localmodel = require('./localmodel');
 const enginesModule = require('./engines');
 const keysModule = require('./keys');
+const { CodexMeter } = require('./codexmeter');
 
 const DAEMON_PID_FILENAME = 'daemon.pid';
 const VERSION = '0.2.0';
@@ -246,6 +247,12 @@ class Scheduler extends EventEmitter {
     // Installed/signed-in state of each engine CLI, for the settings page.
     // Injectable for tests; real callers get the shared cached probe.
     this.engines = o.engines || enginesModule.shared();
+    // ChatGPT-plan usage for the codex engine, read through the Codex CLI's
+    // own app server (src/codexmeter.js). Shares settings.ceilingPct with
+    // the Anthropic meter. Injectable for tests.
+    this.codexMeter = o.codexMeter || new CodexMeter({ settings: this.stateObj.settings });
+    this._lastCodexBudget = { ok: true, reason: 'outage', windows: [], resetsAt: null, planType: null, checkedIso: null };
+    this._currentCodexSleepReason = null;
     this.tickMs = o.tickMs != null ? o.tickMs : 5000;
     // Test-only, documented extension (same pattern as budget.js's
     // minIntervalMs/backoffBaseMs): lets I1 tests observe the sticky-probe
@@ -431,6 +438,23 @@ class Scheduler extends EventEmitter {
     const budgetResult = await this.budget.check();
     this._lastBudget = budgetResult;
 
+    // 3b. Codex meter. Only spawns the app server when it could matter (a
+    // codex project exists, or codex is signed in and the gauge is worth
+    // showing); otherwise reports outage without touching anything.
+    try {
+      this._lastCodexBudget = await this.codexMeter.check(this._codexMeterEnabled());
+    } catch (err) {
+      this._lastCodexBudget = { ok: true, reason: 'outage', windows: [], resetsAt: null, planType: null, checkedIso: util.nowIso() };
+    }
+    if (this._lastCodexBudget.reason === 'ceiling') {
+      if (this._currentCodexSleepReason !== 'ceiling') {
+        this._appendGlobalEvent('sleep', { reason: 'ceiling', until: this._lastCodexBudget.resetsAt || null }, 'codex');
+        this._currentCodexSleepReason = 'ceiling';
+      }
+    } else {
+      this._currentCodexSleepReason = null;
+    }
+
     let effectiveOk = budgetResult.ok;
 
     if (budgetResult.ok) {
@@ -527,6 +551,9 @@ class Scheduler extends EventEmitter {
 
     const gates = { claude: claudeOk };
     for (const id of enginesModule.ENGINE_IDS) if (id !== 'claude') gates[id] = this._engineGate(id).ok;
+    // The codex meter's ceiling gates codex launches on top of the latch; an
+    // outage (no reading) is no opinion, so the latch alone decides then.
+    if (this._lastCodexBudget.reason === 'ceiling') gates.codex = false;
 
     // 4/5. Fill free cycle slots. Launches are NOT awaited: each cycle
     // chain tracks itself in _running/_cyclePromises and the tick returns
@@ -565,6 +592,20 @@ class Scheduler extends EventEmitter {
         this._emitStatusIfChanged();
       });
     this._cyclePromises.add(chain);
+  }
+
+  // Whether reading the codex meter is worth a process spawn this tick.
+  _codexMeterEnabled() {
+    const hasCodexProject = (this.stateObj.projects || []).some(
+      (p) => p.enabled && enginesModule.normalizeEngine(p.engine) === 'codex'
+    );
+    if (hasCodexProject) return true;
+    try {
+      const es = this.engines.current();
+      return !!(es && es.codex && es.codex.loggedIn === true);
+    } catch (err) {
+      return false;
+    }
   }
 
   // Per-engine launch gate, for engines that have no meter. Fake budgets in
@@ -937,6 +978,9 @@ class Scheduler extends EventEmitter {
       if (!gate.ok) {
         status = 'sleeping';
         statusDetail = `${eng} usage limit, retry ${gate.resetsAt || 'soon'}`;
+      } else if (eng === 'codex' && this._lastCodexBudget.reason === 'ceiling') {
+        status = 'sleeping';
+        statusDetail = `codex ceiling, resets ${this._lastCodexBudget.resetsAt || 'soon'}`;
       } else {
         status = 'queued';
         statusDetail = 'queued';
@@ -1045,6 +1089,17 @@ class Scheduler extends EventEmitter {
         reason: this._lastBudget.reason,
         checkedIso: this._lastBudget.checkedIso,
         windows: this._lastBudget.windows || [],
+        // ChatGPT-plan windows for the codex engine (src/codexmeter.js).
+        // reason 'outage' = not readable (codex absent, signed out, or the
+        // meter not needed); windows then empty.
+        codex: {
+          ok: this._lastCodexBudget.ok,
+          reason: this._lastCodexBudget.reason,
+          checkedIso: this._lastCodexBudget.checkedIso,
+          resetsAt: this._lastCodexBudget.resetsAt || null,
+          planType: this._lastCodexBudget.planType || null,
+          windows: this._lastCodexBudget.windows || [],
+        },
       },
       settings: {
         ceilingPct: this.stateObj.settings.ceilingPct,

@@ -823,9 +823,16 @@ function updateDaemonLine() {
   txt.textContent = 'daemon running · pid ' + txt.dataset.pid + ' · up ' + fmtDuration(upSec) + (paused ? ' · PAUSED by user' : '');
 }
 
+// Anthropic windows first, then the codex (ChatGPT plan) windows when the
+// meter has a reading. Both share the ceiling marker.
+function allGaugeWindows() {
+  const b = status.budget || {};
+  return (b.windows || []).concat((b.codex && b.codex.windows) || []);
+}
+
 function renderGauges() {
   const ceil = status.settings.ceilingPct;
-  const windows = (status.budget && status.budget.windows) || [];
+  const windows = allGaugeWindows();
   document.getElementById('gauges').innerHTML = windows.map(w => `
     <div class="gauge">
       <div class="g-head"><span class="g-name">${escapeHtml(w.name)}</span><span class="g-pct">${w.pct.toFixed(1)}%</span></div>
@@ -854,7 +861,7 @@ function renderInvested() {
 }
 
 function paintGauges(ceil) {
-  const windows = (status.budget && status.budget.windows) || [];
+  const windows = allGaugeWindows();
   document.querySelectorAll('#gauges .gauge').forEach((g, i) => {
     const w = windows[i];
     if (!w) return;

@@ -73,11 +73,14 @@ environment; only keys stored on the Settings page are injected back.
   guard and deny rules (both are Claude Code). Codex has no hook mechanism,
   so it is confined by its own `--sandbox workspace-write` and STOP takes
   effect on the daemon's kill poll.
-- **Budget.** The usage meter is Anthropic-only. Codex and OpenRouter
-  projects run until a cycle exits on a usage limit or an empty balance,
-  then that engine sleeps for an hour and its next cycle is the re-check.
-  Engines are gated independently, so one exhausted account never idles
-  the others.
+- **Budget.** The Anthropic meter is read from its usage endpoint. The
+  ChatGPT plan is read through the Codex CLI's own app server
+  (`account/rateLimits/read`): its 5-hour and weekly windows show up as
+  extra gauges in the header and gate Codex cycles against the same
+  ceiling slider. OpenRouter has no windows, only a balance, so an
+  OpenRouter project runs until a cycle exits on an empty balance, then
+  sleeps for an hour. Engines are gated independently, so one exhausted
+  account never idles the others.
 - **OpenRouter models.** The dropdown carries the curated picker from
   sean.wiki/chat minus its Anthropic and OpenAI entries (those vendors run
   on their own engines, never through a third party): Gemini, Grok, Kimi,

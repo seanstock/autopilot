@@ -124,6 +124,8 @@ async function waitUntil(fn, timeoutMs = 1500, intervalMs = 15) {
 
 test.beforeEach(() => {
   tempHome();
+  // Never spawn the real `codex app-server` from a suite (see src/codexmeter.js).
+  process.env.AUTOPILOT_CODEX_METER_OVERRIDE = 'off';
 });
 
 test.afterEach(async () => {
@@ -1006,7 +1008,10 @@ test('snapshot matches the shared status contract shape', async () => {
   // native folder picker on macOS/Linux rather than show a button that 501s.
   assert.deepEqual(Object.keys(snap.daemon).sort(), ['pid', 'startedIso', 'version', 'paused', 'platform'].sort());
   assert.equal(snap.daemon.platform, process.platform);
-  assert.deepEqual(Object.keys(snap.budget).sort(), ['ok', 'reason', 'checkedIso', 'windows'].sort());
+  // 'codex' (2026-09-17): the ChatGPT-plan meter read through the Codex app
+  // server, alongside the Anthropic windows.
+  assert.deepEqual(Object.keys(snap.budget).sort(), ['ok', 'reason', 'checkedIso', 'windows', 'codex'].sort());
+  assert.deepEqual(Object.keys(snap.budget.codex).sort(), ['ok', 'reason', 'checkedIso', 'resetsAt', 'planType', 'windows'].sort());
   // 'notes' is the shared "things to know" prepended to every project's
   // mission. It rides in settings so the UI can edit it in one place.
   assert.deepEqual(Object.keys(snap.settings).sort(),
@@ -1488,4 +1493,68 @@ test('runCycleImpl receives providerKeys and codexLoggedIn', async () => {
   await sched.stopDaemon();
   assert.equal(received.providerKeys.openrouter, 'sk-or');
   assert.equal(received.codexLoggedIn, false);
+});
+
+// ---------------------------------------------------------------------------
+// codex meter (2026-09-17): the ChatGPT-plan windows gate codex launches
+// ---------------------------------------------------------------------------
+
+function fakeCodexMeter(result) {
+  return { calls: 0, async check(enabled) { this.calls += 1; this.lastEnabled = enabled; return typeof result === 'function' ? result() : result; } };
+}
+
+test('codex meter over ceiling: codex projects sleep with a reset time; claude projects keep running', async () => {
+  const claudeP = makeProject({ id: 'c-meter', engine: 'claude' });
+  const codexP = makeProject({ id: 'x-meter', engine: 'codex', model: 'default' });
+  const stateObj = makeStateObj([claudeP, codexP], { graceMinutes: 0 });
+  const budget = makeBudget();
+  budget.engineOk = () => ({ ok: true, reason: null, resetsAt: null });
+  const meter = fakeCodexMeter({ ok: false, reason: 'ceiling', windows: [{ name: 'codex 5h', pct: 91, resetsAt: '2099-01-01T00:00:00.000Z' }], resetsAt: '2099-01-01T00:00:00.000Z', planType: 'plus', checkedIso: util.nowIso() });
+  const seen = [];
+  const sched = new Scheduler({ stateObj, budget, codexMeter: meter, notifyImpl: () => {}, tickMs: 15,
+    runCycleImpl: async ({ project }) => { seen.push(project.id); return cleanResult(); } });
+  sched.start();
+  await waitUntil(() => seen.length >= 3);
+  const snap = sched.snapshot();
+  await sched.stopDaemon();
+
+  assert.ok(seen.every((id) => id === 'c-meter'), `only claude cycles expected, got ${JSON.stringify(seen)}`);
+  const byId = Object.fromEntries(snap.projects.map((p) => [p.id, p]));
+  assert.equal(byId['x-meter'].status, 'sleeping');
+  assert.match(byId['x-meter'].statusDetail, /codex ceiling, resets 2099/);
+  assert.equal(snap.budget.codex.reason, 'ceiling');
+  assert.equal(snap.budget.codex.windows[0].name, 'codex 5h');
+  assert.equal(meter.lastEnabled, true, 'a codex project exists, so the meter is read');
+  const sleeps = events.readEvents(codexP.dir).filter((e) => e.ev === 'sleep' && e.reason === 'ceiling');
+  assert.equal(sleeps.length, 1, 'one sleep event stamped into the codex project, not one per tick');
+  assert.equal(events.readEvents(claudeP.dir).filter((e) => e.ev === 'sleep').length, 0, 'claude projects are not told the codex meter slept');
+});
+
+test('codex meter outage is no opinion: codex projects run on the latch alone', async () => {
+  const codexP = makeProject({ id: 'x-outage', engine: 'codex', model: 'default' });
+  const stateObj = makeStateObj([codexP], { graceMinutes: 0 });
+  const budget = makeBudget();
+  budget.engineOk = () => ({ ok: true, reason: null, resetsAt: null });
+  const meter = fakeCodexMeter({ ok: true, reason: 'outage', windows: [], resetsAt: null, planType: null, checkedIso: util.nowIso() });
+  let runs = 0;
+  const sched = new Scheduler({ stateObj, budget, codexMeter: meter, notifyImpl: () => {}, tickMs: 15,
+    runCycleImpl: async () => { runs += 1; return cleanResult(); } });
+  sched.start();
+  await waitUntil(() => runs >= 2);
+  await sched.stopDaemon();
+  assert.ok(runs >= 2);
+  assert.equal(sched.snapshot().budget.codex.reason, 'outage');
+});
+
+test('the codex meter is not read when nothing needs it (no codex project, codex signed out)', async () => {
+  const claudeP = makeProject({ engine: 'claude' });
+  const fakeEngines = { current: () => ({ claude: { loggedIn: true }, codex: { loggedIn: false } }), refresh: async () => ({}), login: () => ({ ok: true }) };
+  const meter = fakeCodexMeter({ ok: true, reason: 'outage', windows: [], resetsAt: null, planType: null, checkedIso: util.nowIso() });
+  let runs = 0;
+  const sched = new Scheduler({ stateObj: makeStateObj([claudeP]), budget: makeBudget(), codexMeter: meter, engines: fakeEngines, notifyImpl: () => {}, tickMs: 15,
+    runCycleImpl: async () => { runs += 1; return cleanResult(); } });
+  sched.start();
+  await waitUntil(() => runs >= 1);
+  await sched.stopDaemon();
+  assert.equal(meter.lastEnabled, false);
 });

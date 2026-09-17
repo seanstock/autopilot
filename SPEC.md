@@ -300,6 +300,25 @@ Anthropic and OpenAI models run on their own engines, never via a third
 party). `engineForModel` moves a project between engines when its model
 id changes.
 
+**Codex meter (2026-09-17).** `src/codexmeter.js` reads the ChatGPT plan's
+windows by spawning `codex app-server --stdio` and speaking its
+newline-delimited JSON-RPC: `initialize` (clientInfo), `initialized`, then
+`account/rateLimits/read` after a short settle (an immediate read returns
+empty data). The reply's `rateLimits.primary` (5h) and `secondary`
+(weekly) carry `usedPercent`, `windowDurationMins`, `resetsAt` (Unix
+seconds); neither is guaranteed, and the names may drift, so an unreadable
+answer is an outage, never a throw. Codex owns the auth; no key passes
+through Autopilot. Policy mirrors section 3: over `ceilingPct` on any
+window, codex cycles do not launch until the earliest over-window reset
+(a `sleep` event lands in codex projects only); an outage is no opinion
+and the usage-limit latch alone decides, i.e. the pre-meter behaviour. The
+meter is polled at most once a minute, and only when a codex project
+exists or codex is signed in, so an install without Codex spawns nothing.
+Snapshot: `budget.codex` {ok, reason, checkedIso, resetsAt, planType,
+windows}; the UI shows codex windows as extra gauges next to the
+Anthropic ones. Learned from CodexFuse / codex-cli-usage; not an OpenAI
+documented API.
+
 ## 5. Containment profile ("standard")
 
 Generated per project at add-time into `<project>/.autopilot/`:
