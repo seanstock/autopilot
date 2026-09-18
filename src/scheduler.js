@@ -1087,6 +1087,9 @@ class Scheduler extends EventEmitter {
       budget: {
         ok: this._lastBudget.ok,
         reason: this._lastBudget.reason,
+        // Why there is no reading, when there is none (rate limited, token
+        // rejected, network...). null when the meter is fine.
+        detail: this._lastBudget.detail || null,
         checkedIso: this._lastBudget.checkedIso,
         windows: this._lastBudget.windows || [],
         // ChatGPT-plan windows for the codex engine (src/codexmeter.js).

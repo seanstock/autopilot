@@ -274,7 +274,10 @@ class BudgetManager {
     };
   }
 
-  _outageResult(checkedIso) {
+  // detail: one plain sentence on WHY the meter has no reading this time
+  // (rate limited, rejected token, network, unreadable shape). Surfaced in
+  // the snapshot and the UI so an empty gauge row is never silent.
+  _outageResult(checkedIso, detail) {
     // A failed poll must not contradict what a recent good reading proved
     // - the alternative flaps. Observed live, twice, 2026-07-23:
     //  (a) cached OVER-ceiling + failed poll reported 'outage' -> the
@@ -307,6 +310,7 @@ class BudgetManager {
     return {
       ok: false,
       reason: 'outage',
+      detail: detail || null,
       windows: this._lastResult ? this._lastResult.windows : [],
       resetsAt: null,
       checkedIso,
@@ -360,7 +364,9 @@ class BudgetManager {
 
     // Exponential backoff window from a prior 429.
     if (this._backoffUntil && now < this._backoffUntil) {
-      return this._resultFromCache(checkedIso);
+      const cached = this._resultFromCache(checkedIso);
+      if (cached.reason === 'outage') cached.detail = `usage endpoint rate limited (429); next try ${new Date(this._backoffUntil).toISOString()}`;
+      return cached;
     }
 
     // Minimum interval between real endpoint calls.
@@ -375,7 +381,7 @@ class BudgetManager {
       // Missing/unreadable credentials: meter unavailable, fall to probe
       // gate (handled by the scheduler). On 401/expired the interactive CLI
       // (or a probe) will refresh the file for us; we never touch it.
-      return this._outageResult(checkedIso);
+      return this._outageResult(checkedIso, 'no Claude Code login token found (sign in on the Settings page)');
     }
 
     let resp;
@@ -388,17 +394,20 @@ class BudgetManager {
         },
       });
     } catch (err) {
-      return this._outageResult(checkedIso);
+      return this._outageResult(checkedIso, `network: ${(err && err.message) || err}`);
     }
 
     if (resp && resp.status === 429) {
       this._backoffMs = this._backoffMs ? Math.min(this._backoffMs * 2, this.backoffCapMs) : this.backoffBaseMs;
       this._backoffUntil = now + this._backoffMs;
-      return this._outageResult(checkedIso);
+      return this._outageResult(checkedIso, `usage endpoint rate limited (429); next try ${new Date(this._backoffUntil).toISOString()}`);
     }
 
-    if (!resp || resp.status === 401 || resp.status < 200 || resp.status >= 300) {
-      return this._outageResult(checkedIso);
+    if (!resp || resp.status === 401) {
+      return this._outageResult(checkedIso, 'usage endpoint rejected the login token (401); sign in to Claude Code again');
+    }
+    if (resp.status < 200 || resp.status >= 300) {
+      return this._outageResult(checkedIso, `usage endpoint answered HTTP ${resp.status}`);
     }
 
     // Success: any backoff in effect is over.
@@ -409,7 +418,7 @@ class BudgetManager {
     try {
       data = await resp.json();
     } catch (err) {
-      return this._outageResult(checkedIso);
+      return this._outageResult(checkedIso, 'usage endpoint answered with unreadable JSON');
     }
 
     const windows = extractWindows(data);
@@ -421,7 +430,7 @@ class BudgetManager {
     // moment the schema changes. Fail closed instead: report an outage so
     // the scheduler falls to the probe gate, the designed degraded mode.
     if (windows.length === 0) {
-      return this._outageResult(checkedIso);
+      return this._outageResult(checkedIso, 'usage endpoint answered in an unrecognised shape (no utilization windows)');
     }
 
     this._lastResult = { windows, resetsAt: earliestResetsAt(windows) };

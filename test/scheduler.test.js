@@ -1010,7 +1010,7 @@ test('snapshot matches the shared status contract shape', async () => {
   assert.equal(snap.daemon.platform, process.platform);
   // 'codex' (2026-09-17): the ChatGPT-plan meter read through the Codex app
   // server, alongside the Anthropic windows.
-  assert.deepEqual(Object.keys(snap.budget).sort(), ['ok', 'reason', 'checkedIso', 'windows', 'codex'].sort());
+  assert.deepEqual(Object.keys(snap.budget).sort(), ['ok', 'reason', 'detail', 'checkedIso', 'windows', 'codex'].sort());
   assert.deepEqual(Object.keys(snap.budget.codex).sort(), ['ok', 'reason', 'checkedIso', 'resetsAt', 'planType', 'windows'].sort());
   // 'notes' is the shared "things to know" prepended to every project's
   // mission. It rides in settings so the UI can edit it in one place.

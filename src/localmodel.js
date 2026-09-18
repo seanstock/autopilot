@@ -31,6 +31,23 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
+// Where the muse-glimmer install lives. The weights are 16 GB, so the install
+// moved to the data drive on 2026-09-18; the home-dir location is where it
+// started and stays as a fallback for a machine without a D: drive. The first
+// candidate that exists wins. When none does, the first is reported so the
+// "start script not found" error names the expected place.
+const START_CANDIDATES = [
+  path.normalize('D:/muse-glimmer/start-all.ps1'),
+  path.join(os.homedir(), 'muse-glimmer', 'start-all.ps1'),
+];
+
+function defaultStartCommand() {
+  for (const c of START_CANDIDATES) {
+    try { if (fs.existsSync(c)) return c; } catch (err) { /* treat as absent */ }
+  }
+  return START_CANDIDATES[0];
+}
+
 const DEFAULTS = {
   id: 'muse-glimmer',
   label: 'Muse Glimmer 30B (local)',
@@ -39,7 +56,7 @@ const DEFAULTS = {
   // Script that brings up both processes. The start button only appears when
   // this file actually exists, so an install without it simply has no button
   // rather than a button that fails.
-  startCommand: path.join(os.homedir(), 'muse-glimmer', 'start-all.ps1'),
+  startCommand: defaultStartCommand(),
 };
 
 const TTL_MS = 15000;

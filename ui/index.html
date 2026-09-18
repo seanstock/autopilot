@@ -839,6 +839,13 @@ function renderGauges() {
       <div class="bar"><div class="fill"></div><div class="ceil"></div></div>
       <div class="g-reset">resets in <span class="cd" data-resets="${escapeHtml(w.resetsAt || '')}">--</span></div>
     </div>`).join('') || '<div style="color:var(--text-secondary);font-size:12px;">budget unavailable</div>';
+  // The Anthropic meter having no windows is never silent: say why.
+  const b = status.budget || {};
+  if (!(b.windows || []).length && b.reason) {
+    const why = b.detail || (b.reason === 'fatal' ? 'global stop latched' : b.reason);
+    document.getElementById('gauges').insertAdjacentHTML('beforeend',
+      `<div class="gauge" style="flex-basis:100%"><div class="g-head"><span class="g-name">claude meter</span><span class="g-pct" style="color:var(--warning)">${escapeHtml(b.reason)}</span></div><div class="g-reset">${escapeHtml(why)}</div></div>`);
+  }
   paintGauges(ceil);
   tickCountdowns();
   renderInvested();
@@ -2237,8 +2244,12 @@ function syncLocalModelOptions() {
         opt.dataset.local = '1';
         // Sit under the blank "none" entry on the worker selects, but at the
         // very top on the orchestrator selects, which have no blank entry.
+        // Options may live inside an <optgroup>, so insert relative to the
+        // reference option's own parent rather than the <select>.
         const hasBlank = sel.options.length && sel.options[0].value === '';
-        sel.insertBefore(opt, hasBlank ? (sel.options[1] || null) : (sel.options[0] || null));
+        const ref = hasBlank ? sel.options[1] : sel.options[0];
+        if (ref) ref.parentNode.insertBefore(opt, ref);
+        else sel.appendChild(opt);
       }
     } else if (existing) {
       // Don't yank a selection out from under someone mid-edit; mark it so
