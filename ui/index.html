@@ -835,7 +835,7 @@ function renderGauges() {
   const windows = allGaugeWindows();
   document.getElementById('gauges').innerHTML = windows.map(w => `
     <div class="gauge">
-      <div class="g-head"><span class="g-name">${escapeHtml(w.name)}</span><span class="g-pct">${w.pct.toFixed(1)}%</span></div>
+      <div class="g-head"><span class="g-name">${escapeHtml(w.label || w.name)}</span><span class="g-pct">${w.pct.toFixed(1)}%</span></div>
       <div class="bar"><div class="fill"></div><div class="ceil"></div></div>
       <div class="g-reset">resets in <span class="cd" data-resets="${escapeHtml(w.resetsAt || '')}">--</span></div>
     </div>`).join('') || '<div style="color:var(--text-secondary);font-size:12px;">budget unavailable</div>';

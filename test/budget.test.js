@@ -771,3 +771,35 @@ test('noteUsageLimitExit() with no engine keeps the original claude behaviour', 
   assert.ok(mgr._forcedUntilResetsAt);
   assert.equal(mgr.engineOk('codex').ok, true);
 });
+
+// ---------------------------------------------------------------------------
+// window labels + codename slots (2026-09-18)
+// ---------------------------------------------------------------------------
+//
+// The live response carries five_hour / seven_day plus a row of codename
+// experiment slots (nimbus_quill, tangelo, cinder_cove, ...), mostly null,
+// one reading 0% with no reset. Labels are for the gauges; names stay raw.
+
+test('extractWindows labels the known windows and drops empty codename slots', () => {
+  const { extractWindows } = require('../src/budget');
+  const live = {
+    five_hour: { utilization: 41, resets_at: '2026-09-18T15:20:00Z' },
+    seven_day: { utilization: 83, resets_at: '2026-09-20T03:00:00Z' },
+    seven_day_opus: null,
+    tangelo: null,
+    nimbus_quill: { utilization: 0, resets_at: null },
+    extra_usage: { is_enabled: false },
+    limits: [{ kind: 'session', percent: 41 }],
+  };
+  const w = extractWindows(live);
+  assert.deepEqual(w.map((x) => [x.name, x.label, x.pct]), [
+    ['five_hour', 'claude 5h', 41],
+    ['seven_day', 'claude week', 83],
+  ]);
+  // A codename slot that actually carries a reading or a reset is kept (and
+  // labelled), because that is what a new real window would look like.
+  const w2 = extractWindows({ nimbus_quill: { utilization: 12, resets_at: null } });
+  assert.deepEqual(w2.map((x) => [x.name, x.label, x.pct]), [['nimbus_quill', 'claude nimbus quill', 12]]);
+  const w3 = extractWindows({ five_hour: { utilization: 0, resets_at: '2026-09-18T15:20:00Z' } });
+  assert.equal(w3.length, 1, 'a known window at 0% is still a window');
+});

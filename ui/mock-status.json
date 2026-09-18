@@ -6,8 +6,8 @@
     "reason": null,
     "checkedIso": "2026-07-23T08:20:00-07:00",
     "windows": [
-      { "name": "five_hour", "pct": 42.1, "resetsAt": "2026-07-23T10:22:40-07:00" },
-      { "name": "seven_day", "pct": 18.0, "resetsAt": "2026-07-27T12:00:00-07:00" }
+      { "name": "five_hour", "label": "claude 5h", "pct": 42.1, "resetsAt": "2026-07-23T10:22:40-07:00" },
+      { "name": "seven_day", "label": "claude week", "pct": 18.0, "resetsAt": "2026-07-27T12:00:00-07:00" }
     ]
   },
   "settings": { "ceilingPct": 75, "graceMinutes": 30, "webhook": null },

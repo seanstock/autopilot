@@ -132,6 +132,15 @@ function readKeychainToken(execImpl, platform) {
 // is itself an object carrying a `utilization` field. Entries that don't
 // parse to a finite number are skipped rather than thrown on. `resets_at`
 // is optional per-window; missing/unparseable resolves to null.
+// Display labels for the windows the endpoint is known to send. `name` stays
+// the raw key (the scheduler, events and tests key on it); `label` is what
+// the UI shows, matching the codex meter's "codex week" wording.
+const WINDOW_LABELS = { five_hour: 'claude 5h', seven_day: 'claude week' };
+
+function windowLabel(key) {
+  return WINDOW_LABELS[key] || `claude ${String(key).replace(/_/g, ' ')}`;
+}
+
 function extractWindows(data) {
   const windows = [];
   if (!data || typeof data !== 'object' || Array.isArray(data)) return windows;
@@ -141,7 +150,14 @@ function extractWindows(data) {
     const pct = normalizePct(value.utilization);
     if (pct === null) continue;
     const resetsRaw = value.resets_at || value.reset_at || value.resetsAt || null;
-    windows.push({ name, pct, resetsAt: typeof resetsRaw === 'string' ? resetsRaw : null });
+    const resetsAt = typeof resetsRaw === 'string' ? resetsRaw : null;
+    // The endpoint also carries a row of codename-keyed experiment slots
+    // (nimbus_quill, tangelo, cinder_cove, ...; observed 2026-09-18), almost
+    // all null and the odd one reading 0% with no reset. A real window
+    // always has a reset time or a non-zero reading; a codename with
+    // neither is noise, not a budget, and would only clutter the gauges.
+    if (!(name in WINDOW_LABELS) && pct === 0 && !resetsAt) continue;
+    windows.push({ name, label: windowLabel(name), pct, resetsAt });
   }
   return windows;
 }
